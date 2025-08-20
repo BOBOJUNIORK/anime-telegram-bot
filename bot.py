@@ -154,6 +154,31 @@ def search_character(query, limit=10):
         logger.error(f"Erreur de connexion: {e}")
     return None
 
+def get_character_by_id(character_id):
+    """Récupère les détails complets d'un personnage par son ID"""
+    url = f"https://api.jikan.moe/v4/characters/{character_id}/full"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            return r.json().get("data")
+        logger.error(f"Erreur API Jikan (character): {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erreur de connexion (character): {e}")
+    return None
+
+def get_anime_characters(anime_id):
+    """Récupère tous les personnages d'un anime"""
+    url = f"https://api.jikan.moe/v4/anime/{anime_id}/characters"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("data") or []
+        logger.error(f"Erreur API Jikan (anime characters): {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erreur de connexion (anime characters): {e}")
+    return []
+
 def get_anime_recommendations(genres, exclude_id, limit=5):
     genre_ids = [str(g["mal_id"]) for g in genres[:2]]
     genre_query = ",".join(genre_ids)
@@ -205,6 +230,17 @@ def get_schedule(day=None):
     except requests.exceptions.RequestException as e:
         logger.error(f"Erreur de connexion (schedule): {e}")
     return []
+def get_character_by_id(character_id):
+    """Récupère les détails complets d'un personnage par son ID"""
+    url = f"https://api.jikan.moe/v4/characters/{character_id}/full"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            return r.json().get("data")
+        logger.error(f"Erreur API Jikan (character): {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erreur de connexion (character): {e}")
+    return None
 
 # ──────────────────────────
 # Vérification des liens de streaming
@@ -310,22 +346,84 @@ def format_studio_info(anime):
     )
 
 def format_character_info(character):
+    """Formatage amélioré des informations sur les personnages"""
     name = escape_html(decode_html_entities(character.get("name", "Nom inconnu")))
     name_kanji = escape_html(decode_html_entities(character.get("name_kanji", "")))
     about = decode_html_entities(character.get("about", "Pas d'informations disponibles"))
+    
+    # Récupérer les informations supplémentaires si disponibles
+    nicknames = character.get("nicknames", [])
+    favorites = character.get("favorites", 0)
+    mangaography = character.get("mangaography", [])
+    animeography = character.get("animeography", [])
+    voice_actors = character.get("voices", []) if isinstance(character.get("voices"), list) else []
+    
+    # Traduire la description
     try:
         if about and about != "Pas d'informations disponibles":
-            about_short = truncate(about, 800)
-            about_fr = GoogleTranslator(source="auto", target="fr").translate(about_short)
+            # Utiliser plus de texte pour une meilleure description
+            about_to_translate = about[:2000]  # Augmenter la limite
+            about_fr = GoogleTranslator(source="auto", target="fr").translate(about_to_translate)
         else:
             about_fr = about
     except Exception as e:
         logger.error(f"Erreur de traduction personnage: {e}")
         about_fr = about
-
+    
     about_fr = escape_html(about_fr)
-    title = f"{name} ({name_kanji})" if name_kanji else name
-    return f"👤 <b>{title}</b>\n\n📝 <b>Description</b>:\n{about_fr}"
+    
+    # Construction du texte
+    text = f"👤 <b>{name}</b>"
+    if name_kanji:
+        text += f" ({name_kanji})"
+    
+    if nicknames:
+        text += f"\n🎭 <b>Surnoms</b>: {', '.join([escape_html(n) for n in nicknames])}"
+    
+    text += f"\n❤️ <b>Favoris</b>: {favorites}"
+    
+    if about_fr:
+        text += f"\n\n📝 <b>Description</b>:\n{about_fr}"
+    
+    # Ajouter les anime et manga importants
+    if animeography:
+        main_anime = [a for a in animeography if a.get("role") == "Main"]
+        if main_anime:
+            text += f"\n\n📺 <b>Anime principal</b>: {escape_html(main_anime[0].get('name', 'Inconnu'))}"
+    
+    # Ajouter les doubleurs (seiyuu)
+    if voice_actors:
+        japanese_va = [va for va in voice_actors if va.get('language') == 'Japanese']
+        if japanese_va:
+            text += f"\n🎙️ <b>Seiyuu</b>: {escape_html(japanese_va[0].get('person', {}).get('name', 'Inconnu'))}"
+    
+    return text
+
+def format_anime_characters_list(anime_title, characters):
+    """Formate la liste des personnages d'un anime"""
+    title = escape_html(decode_html_entities(anime_title))
+    text = f"👥 <b>Personnages de {title}</b>\n\n"
+    
+    # Séparer les personnages principaux et secondaires
+    main_characters = [c for c in characters if c.get("role") == "Main"]
+    supporting_characters = [c for c in characters if c.get("role") == "Supporting"]
+    
+    if main_characters:
+        text += "🎯 <b>Personnages Principaux</b>:\n"
+        for i, character in enumerate(main_characters[:10], 1):  # Limiter à 10
+            name = escape_html(decode_html_entities(character.get("character", {}).get("name", "Inconnu")))
+            text += f"{i}. {name}\n"
+    
+    if supporting_characters:
+        text += "\n👥 <b>Personnages Secondaires</b>:\n"
+        for i, character in enumerate(supporting_characters[:10], 1):  # Limiter à 10
+            name = escape_html(decode_html_entities(character.get("character", {}).get("name", "Inconnu")))
+            text += f"{i}. {name}\n"
+    
+    if len(main_characters) > 10 or len(supporting_characters) > 10:
+        text += f"\n... et {max(0, len(main_characters) - 10) + max(0, len(supporting_characters) - 10)} autres personnages"
+    
+    return text
 
 def format_streaming_links(anime, streaming_links):
     """Formate les liens de streaming pour l'anime"""
@@ -416,10 +514,52 @@ def create_anime_navigation_keyboard(anime_id):
             InlineKeyboardButton("🎬 Trailer", callback_data=f"trailer_{anime_id}"),
         ],
         [
+            InlineKeyboardButton("👥 Personnages", callback_data=f"anime_chars_{anime_id}"),
             InlineKeyboardButton("🎯 Similaires", callback_data=f"similar_{anime_id}"),
+        ],
+        [
             InlineKeyboardButton("📺 Streaming", callback_data=f"streaming_{anime_id}"),
         ],
     ]
+    return InlineKeyboardMarkup(keyboard)
+
+def create_characters_list_keyboard(characters, anime_id, page=0, items_per_page=10):
+    """Crée un clavier pour la liste des personnages d'un anime"""
+    keyboard = []
+    start_idx = page * items_per_page
+    end_idx = min(start_idx + items_per_page, len(characters))
+    
+    for i in range(start_idx, end_idx):
+        character = characters[i]
+        char_data = character.get("character", {})
+        name = decode_html_entities(char_data.get("name", "Sans nom"))
+        character_id = char_data.get("mal_id")
+        
+        if len(name) > 30:
+            name = name[:27] + "..."
+        
+        role = character.get("role", "")
+        if role == "Main":
+            name = "🎯 " + name
+        elif role == "Supporting":
+            name = "👥 " + name
+        
+        keyboard.append([InlineKeyboardButton(name, callback_data=f"character_{character_id}")])
+    
+    # Ajouter la pagination si nécessaire
+    total_pages = math.ceil(len(characters) / items_per_page)
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"chars_page_{anime_id}_{page-1}"))
+        nav_buttons.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav_buttons.append(InlineKeyboardButton("➡️", callback_data=f"chars_page_{anime_id}_{page+1}"))
+        keyboard.append(nav_buttons)
+    
+    # Ajouter le bouton retour
+    keyboard.append([InlineKeyboardButton("🔙 Retour à l'anime", callback_data=f"anime_{anime_id}")])
+    
     return InlineKeyboardMarkup(keyboard)
 
 def create_search_pagination_keyboard(results, current_page=0, query="", search_type="anime"):
@@ -967,6 +1107,74 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = create_schedule_keyboard()
         
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+    
+    elif data.startswith("anime_chars_"):
+        # Afficher les personnages d'un anime
+        anime_id = data.split("_")[2]
+        anime = get_anime_by_id(anime_id)
+        if anime:
+            characters = get_anime_characters(anime_id)
+            if characters:
+                # Stocker les personnages dans le contexte pour la pagination
+                context.user_data[f"anime_chars_{anime_id}"] = characters
+                anime_title = anime.get("title", "Cet anime")
+                list_text = format_anime_characters_list(anime_title, characters)
+                keyboard = create_characters_list_keyboard(characters, anime_id, 0)
+                await query.message.reply_text(list_text, parse_mode="HTML", reply_markup=keyboard)
+            else:
+                await query.message.reply_text("❌ Aucun personnage trouvé pour cet anime.", parse_mode="HTML")
+        else:
+            await query.message.reply_text("❌ Impossible de charger les personnages.", parse_mode="HTML")
+
+    elif data.startswith("chars_page_"):
+        # Pagination pour la liste des personnages
+        parts = data.split("_")
+        anime_id = parts[3]
+        page = int(parts[4])
+        
+        characters = context.user_data.get(f"anime_chars_{anime_id}", [])
+        if characters:
+            anime = get_anime_by_id(anime_id)
+            anime_title = anime.get("title", "Cet anime") if anime else "Cet anime"
+            list_text = format_anime_characters_list(anime_title, characters)
+            keyboard = create_characters_list_keyboard(characters, anime_id, page)
+            await query.edit_message_text(list_text, parse_mode="HTML", reply_markup=keyboard)
+        else:
+            await query.answer("❌ Données de personnages non disponibles.")
+
+    elif data.startswith("character_"):
+        # Afficher les détails d'un personnage (version améliorée)
+        character_id = data.split("_")[1]
+        character = get_character_by_id(character_id)
+        if character:
+            # Pour le bouton retour, on essaie de trouver l'anime d'origine
+            anime_id = None
+            for key in context.user_data:
+                if key.startswith("anime_chars_"):
+                    anime_id = key.split("_")[2]
+                    break
+            
+            if anime_id:
+                reply_markup = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Retour aux personnages", callback_data=f"anime_chars_{anime_id}")]
+                ])
+            else:
+                reply_markup = None
+                
+            info_text = format_character_info(character)
+            image_url = character.get("images", {}).get("jpg", {}).get("image_url")
+            
+            if image_url:
+                await query.message.reply_photo(
+                    photo=image_url, 
+                    caption=info_text, 
+                    parse_mode="HTML", 
+                    reply_markup=reply_markup
+                )
+            else:
+                await query.message.reply_text(info_text, parse_mode="HTML", reply_markup=reply_markup)
+        else:
+            await query.message.reply_text("❌ Erreur lors du chargement des détails du personnage.", parse_mode="HTML")
 
 # ──────────────────────────
 # Messages & erreurs
