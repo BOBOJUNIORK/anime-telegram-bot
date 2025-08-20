@@ -128,10 +128,10 @@ def format_anime_basic_info(anime):
 
     caption = (
         f"🎌 <b>{titre}</b>{f' ({titre_jp})' if titre_jp != 'N/A' else ''}\n\n"
-        f"⭐ <b>Note</b>: {score}/10\n"
-        f"📺 <b>Épisodes</b>: {episodes}\n"
-        f"📊 <b>Statut</b>: {status}\n"
-        f"📅 <b>Année</b>: {year}\n\n"
+        f"⭐ <b>Note</b> : {score}/10\n"
+        f"📺 <b>Épisodes</b> : {episodes}\n"
+        f"📊 <b>Statut</b> : {status}\n"
+        f"📅 <b>Année</b> : {year}\n\n"
         f"👇 <b>Utilisez les boutons pour plus d'infos</b>"
     )
     # Limite caption Telegram: 1024
@@ -151,7 +151,7 @@ def format_synopsis(anime):
         synopsis_fr = synopsis
 
     synopsis_fr = escape_html(synopsis_fr)
-    return f"📝 <b>Synopsis de {titre}</b>:\n\n{synopsis_fr}"
+    return f"📝 <b>Synopsis de {titre}</b> :\n\n{synopsis_fr}"
 
 def format_details(anime):
     titre = escape_html(decode_html_entities(anime.get("title", "Titre inconnu")))
@@ -161,11 +161,11 @@ def format_details(anime):
     genres = ", ".join(escape_html(decode_html_entities(g["name"])) for g in anime.get("genres", []))
 
     return (
-        f"🔍 <b>Détails de {titre}</b>:\n\n"
-        f"🎭 <b>Genres</b>: {genres or 'N/A'}\n"
-        f"⏱️ <b>Durée par épisode</b>: {duration}\n"
-        f"📚 <b>Source</b>: {source}\n"
-        f"🔞 <b>Classification</b>: {rating}"
+        f"🔍 <b>Détails de {titre}</b> :\n\n"
+        f"🎭 <b>Genres</b> : {genres or 'N/A'}\n"
+        f"⏱️ <b>Durée par épisode</b> : {duration}\n"
+        f"📚 <b>Source</b> : {source}\n"
+        f"🔞 <b>Classification</b> : {rating}"
     )
 
 def format_studio_info(anime):
@@ -177,9 +177,9 @@ def format_studio_info(anime):
     producer_text = ", ".join(producers[:3]) if producers else "Inconnu"
 
     return (
-        f"🏢 <b>Infos production de {titre}</b>:\n\n"
-        f"🎬 <b>Studio(s)</b>: {studio_text}\n"
-        f"👔 <b>Producteur(s)</b>: {producer_text}"
+        f"🏢 <b>Infos production de {titre}</b> :\n\n"
+        f"🎬 <b>Studio(s)</b> : {studio_text}\n"
+        f"👔 <b>Producteur(s)</b> : {producer_text}"
     )
 
 def format_character_info(character):
@@ -480,6 +480,30 @@ async def perform_search(update: Update, query: str, context: ContextTypes.DEFAU
         )
 
 # ──────────────────────────
+# Claviers inline pour les sous-pages
+# ──────────────────────────
+def create_back_button_keyboard(anime_id):
+    """Crée un clavier avec uniquement le bouton Retour"""
+    keyboard = [
+        [InlineKeyboardButton("🔙 Retour à l'anime", callback_data=f"anime_{anime_id}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def create_similar_animes_keyboard(similar_animes, original_anime_id):
+    """Crée un clavier pour les animes similaires avec bouton retour"""
+    keyboard = []
+    for anime in similar_animes:
+        title = decode_html_entities(anime.get("title", "Sans titre"))
+        if len(title) > 35:
+            title = title[:32] + "..."
+        keyboard.append([InlineKeyboardButton(title, callback_data=f"anime_{anime['mal_id']}")])
+    
+    # Ajouter le bouton retour
+    keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data=f"anime_{original_anime_id}")])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+# ──────────────────────────
 # Boutons inline
 # ──────────────────────────
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -532,7 +556,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         anime = get_anime_by_id(anime_id)
         if anime:
             synopsis_text = format_synopsis(anime)
-            await query.message.reply_text(synopsis_text, parse_mode="HTML")
+            reply_markup = create_back_button_keyboard(anime_id)
+            await query.message.reply_text(synopsis_text, parse_mode="HTML", reply_markup=reply_markup)
         else:
             await query.message.reply_text("❌ Impossible de charger le synopsis.", parse_mode="HTML")
 
@@ -541,7 +566,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         anime = get_anime_by_id(anime_id)
         if anime:
             details_text = format_details(anime)
-            await query.message.reply_text(details_text, parse_mode="HTML")
+            reply_markup = create_back_button_keyboard(anime_id)
+            await query.message.reply_text(details_text, parse_mode="HTML", reply_markup=reply_markup)
         else:
             await query.message.reply_text("❌ Impossible de charger les détails.", parse_mode="HTML")
 
@@ -550,7 +576,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         anime = get_anime_by_id(anime_id)
         if anime:
             studio_text = format_studio_info(anime)
-            await query.message.reply_text(studio_text, parse_mode="HTML")
+            reply_markup = create_back_button_keyboard(anime_id)
+            await query.message.reply_text(studio_text, parse_mode="HTML", reply_markup=reply_markup)
         else:
             await query.message.reply_text("❌ Impossible de charger les infos studio.", parse_mode="HTML")
 
@@ -563,9 +590,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 trailer_url = anime["trailer"]["url"]
             if trailer_url:
                 titre = escape_html(decode_html_entities(anime.get("title", "Cet anime")))
-                await query.message.reply_text(f"🎬 <b>Trailer de {titre}</b>:\n\n{escape_html(trailer_url)}", parse_mode="HTML")
+                reply_markup = create_back_button_keyboard(anime_id)
+                await query.message.reply_text(
+                    f"🎬 <b>Trailer de {titre}</b>:\n\n{escape_html(trailer_url)}", 
+                    parse_mode="HTML", 
+                    reply_markup=reply_markup
+                )
             else:
-                await query.message.reply_text("❌ Aucun trailer disponible pour cet anime.", parse_mode="HTML")
+                reply_markup = create_back_button_keyboard(anime_id)
+                await query.message.reply_text(
+                    "❌ Aucun trailer disponible pour cet anime.", 
+                    parse_mode="HTML", 
+                    reply_markup=reply_markup
+                )
         else:
             await query.message.reply_text("❌ Impossible de charger le trailer.", parse_mode="HTML")
 
@@ -575,20 +612,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if anime and anime.get("genres"):
             recs = get_anime_recommendations(anime["genres"], anime_id, 5)
             if recs:
-                keyboard = []
-                for rec in recs:
-                    title = decode_html_entities(rec.get("title", "Sans titre"))
-                    if len(title) > 35:
-                        title = title[:32] + "..."
-                    keyboard.append([InlineKeyboardButton(title, callback_data=f"anime_{rec['mal_id']}")])
                 titre_original = escape_html(decode_html_entities(anime.get("title", "Cet anime")))
+                reply_markup = create_similar_animes_keyboard(recs, anime_id)
                 await query.message.reply_text(
                     f"🎯 <b>Animes similaires à {titre_original}</b>:\nBasé sur des genres proches :",
                     parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    reply_markup=reply_markup,
                 )
             else:
-                await query.message.reply_text("❌ Aucune recommandation trouvée.", parse_mode="HTML")
+                reply_markup = create_back_button_keyboard(anime_id)
+                await query.message.reply_text(
+                    "❌ Aucune recommandation trouvée.", 
+                    parse_mode="HTML", 
+                    reply_markup=reply_markup
+                )
         else:
             await query.message.reply_text("❌ Impossible de charger les recommandations.", parse_mode="HTML")
 
