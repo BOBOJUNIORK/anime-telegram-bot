@@ -4,6 +4,10 @@ import math
 import logging
 import html
 import requests
+import random
+import asyncio
+from datetime import datetime
+from urllib.parse import quote
 
 from telegram import (
     Update,
@@ -29,10 +33,45 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────
-# Token via variable d’environnement
-# (sur Render: Settings > Environment > KEY=TOKEN, VALUE=ton_token)
+# Token via variable d'environnement
 # ──────────────────────────
-TOKEN = os.getenv("TOKEN")  # ne laisse pas ton token en clair dans le code !
+TOKEN = os.getenv("TOKEN")
+
+# ──────────────────────────
+# Configuration
+# ──────────────────────────
+STREAMING_SITES = [
+    {
+        "name": "VoirAnime",
+        "base_url": "https://voiranime.com",
+        "search_url": "https://voiranime.com/?s={query}",
+        "anime_url": "https://voiranime.com/anime/{slug}"
+    },
+    {
+        "name": "Anime-Sama",
+        "base_url": "https://www.anime-sama.fr",
+        "search_url": "https://www.anime-sama.fr/search/?q={query}",
+        "anime_url": "https://www.anime-sama.fr/anime/{slug}"
+    },
+    {
+        "name": "French-Anime",
+        "base_url": "https://french-anime.com",
+        "search_url": "https://french-anime.com/search?q={query}",
+        "anime_url": "https://french-anime.com/anime/{slug}"
+    },
+    {
+        "name": "Franime",
+        "base_url": "https://franime.fr",
+        "search_url": "https://franime.fr/?s={query}",
+        "anime_url": "https://franime.fr/anime/{slug}"
+    },
+    {
+        "name": "Anime-Ultime",
+        "base_url": "https://www.anime-ultime.net",
+        "search_url": "https://www.anime-ultime.net/search-0-0-{query}.html",
+        "anime_url": "https://www.anime-ultime.net/anime-{id}-0/infos.html"
+    }
+]
 
 # ──────────────────────────
 # Utilitaires de texte
@@ -52,6 +91,20 @@ def escape_html(text: str) -> str:
 def truncate(s: str, limit: int) -> str:
     s = s or ""
     return (s[: limit - 3] + "...") if len(s) > limit else s
+
+def create_slug(title: str) -> str:
+    """Crée un slug à partir d'un titre d'anime"""
+    # Convertir en minuscules
+    slug = title.lower()
+    # Remplacer les espaces par des tirets
+    slug = re.sub(r'\s+', '-', slug)
+    # Supprimer les caractères non alphanumériques (sauf les tirets)
+    slug = re.sub(r'[^a-z0-9\-]', '', slug)
+    # Supprimer les tirets multiples
+    slug = re.sub(r'\-+', '-', slug)
+    # Supprimer les tirets en début et fin
+    slug = slug.strip('-')
+    return slug
 
 # ──────────────────────────
 # Appels API Jikan
@@ -114,6 +167,80 @@ def get_anime_recommendations(genres, exclude_id, limit=5):
     except requests.exceptions.RequestException as e:
         logger.error(f"Erreur de connexion pour les recommandations: {e}")
     return None
+
+def get_top_anime(filter_type="all", page=1):
+    url = f"https://api.jikan.moe/v4/top/anime?filter={filter_type}&page={page}"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("data") or [], data.get("pagination", {}).get("last_visible_page", 1)
+        logger.error(f"Erreur API Jikan (top): {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erreur de connexion (top): {e}")
+    return [], 1
+
+def get_random_anime():
+    url = "https://api.jikan.moe/v4/random/anime"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            return r.json().get("data")
+        logger.error(f"Erreur API Jikan (random): {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erreur de connexion (random): {e}")
+    return None
+
+def get_schedule(day=None):
+    if day:
+        url = f"https://api.jikan.moe/v4/schedules?filter={day}"
+    else:
+        url = "https://api.jikan.moe/v4/schedules"
+    
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            return r.json().get("data") or []
+        logger.error(f"Erreur API Jikan (schedule): {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erreur de connexion (schedule): {e}")
+    return []
+
+# ──────────────────────────
+# Vérification des liens de streaming
+# ──────────────────────────
+async def check_streaming_availability(anime_title):
+    """Vérifie la disponibilité sur les sites de streaming"""
+    results = {}
+    slug = create_slug(anime_title)
+    
+    for site in STREAMING_SITES:
+        try:
+            # Essayer d'abord avec l'URL directe
+            if "anime_url" in site:
+                if "{slug}" in site["anime_url"]:
+                    test_url = site["anime_url"].format(slug=slug)
+                else:
+                    # Pour Anime-Ultime qui utilise un ID, on utilise la recherche
+                    test_url = site["search_url"].format(query=quote(anime_title))
+                
+                # Faire une requête HEAD pour vérifier si la page existe
+                response = requests.head(test_url, timeout=5, allow_redirects=True)
+                
+                if response.status_code == 200:
+                    results[site["name"]] = test_url
+                    continue
+            
+            # Fallback sur la recherche
+            search_url = site["search_url"].format(query=quote(anime_title))
+            results[site["name"]] = search_url
+                
+        except requests.exceptions.RequestException:
+            # En cas d'erreur, utiliser l'URL de recherche
+            search_url = site["search_url"].format(query=quote(anime_title))
+            results[site["name"]] = search_url
+    
+    return results
 
 # ──────────────────────────
 # Formatage (HTML)
@@ -200,38 +327,78 @@ def format_character_info(character):
     title = f"{name} ({name_kanji})" if name_kanji else name
     return f"👤 <b>{title}</b>\n\n📝 <b>Description</b>:\n{about_fr}"
 
-# ──────────────────────────
-# Liens de streaming
-# ──────────────────────────
-def generate_watch_links(anime_title):
-    """Génère des liens de recherche vers les sites de streaming français"""
-    encoded_title = requests.utils.quote(anime_title)
-    
-    sites = [
-        ("VoirAnime", f"https://voiranime.com/?s={encoded_title}"),
-        ("Anime-Sama", f"https://www.anime-sama.fr/search/?q={encoded_title}"),
-        ("French-Anime", f"https://french-anime.com/search?q={encoded_title}"),
-        ("Franime", f"https://franime.fr/?s={encoded_title}"),
-        ("Anime-Ultime", f"https://www.anime-ultime.net/search-0-0-{encoded_title}.html"),
-    ]
-    
-    return sites
-
-def format_streaming_links(anime):
+def format_streaming_links(anime, streaming_links):
     """Formate les liens de streaming pour l'anime"""
     titre = escape_html(decode_html_entities(anime.get("title", "Titre inconnu")))
-    
-    # Générer les liens de recherche
-    streaming_links = generate_watch_links(anime.get("title", ""))
     
     # Créer le texte avec les liens
     text = f"📺 <b>Regarder {titre}</b>:\n\n"
     text += "Voici où vous pourriez trouver cet anime:\n\n"
     
-    for site_name, url in streaming_links:
+    for site_name, url in streaming_links.items():
         text += f"• <a href='{escape_html(url)}'>{escape_html(site_name)}</a>\n"
     
-    text += "\n🔍 <i>Note: Ces liens mènent à des pages de recherche. La disponibilité peut varier.</i>"
+    text += "\n🔍 <i>Note: Ces liens mènent directement aux animes quand disponibles, sinon à des pages de recherche.</i>"
+    
+    return text
+
+def format_top_anime_list(anime_list, filter_type, page, total_pages):
+    """Formate la liste des top animes"""
+    filter_names = {
+        "all": "Tous les temps",
+        "airing": "En cours de diffusion",
+        "upcoming": "À venir",
+        "tv": "Séries TV",
+        "movie": "Films",
+        "ova": "OVA",
+        "special": "Spéciaux",
+        "bypopularity": "Populaires",
+        "favorite": "Favoris"
+    }
+    
+    text = f"🏆 <b>Top Anime - {filter_names.get(filter_type, filter_type)}</b>\n\n"
+    
+    for i, anime in enumerate(anime_list, 1):
+        title = escape_html(decode_html_entities(anime.get("title", "Titre inconnu")))
+        score = escape_html(str(anime.get("score", "N/A")))
+        text += f"{i}. {title} ⭐ {score}\n"
+    
+    text += f"\n📄 Page {page}/{total_pages}"
+    return text
+
+def format_schedule(schedule_list, day=None):
+    """Formate le planning des sorties"""
+    day_names = {
+        "monday": "Lundi",
+        "tuesday": "Mardi",
+        "wednesday": "Mercredi",
+        "thursday": "Jeudi",
+        "friday": "Vendredi",
+        "saturday": "Samedi",
+        "sunday": "Dimanche",
+        "other": "Autre",
+        "unknown": "Inconnu"
+    }
+    
+    if day:
+        title = f"📅 <b>Sorties du {day_names.get(day, day)}</b>\n\n"
+    else:
+        title = "📅 <b>Sorties de la semaine</b>\n\n"
+    
+    if not schedule_list:
+        return title + "Aucune sortie prévue pour cette période."
+    
+    text = title
+    for anime in schedule_list[:10]:  # Limiter à 10 résultats
+        title = escape_html(decode_html_entities(anime.get("title", "Titre inconnu")))
+        score = escape_html(str(anime.get("score", "N/A")))
+        text += f"• {title}"
+        if score != "N/A":
+            text += f" ⭐ {score}"
+        text += "\n"
+    
+    if len(schedule_list) > 10:
+        text += f"\n... et {len(schedule_list) - 10} autres"
     
     return text
 
@@ -289,6 +456,87 @@ def create_search_pagination_keyboard(results, current_page=0, query="", search_
 
     return InlineKeyboardMarkup(keyboard)
 
+def create_top_anime_keyboard(current_filter="all", current_page=1, total_pages=1):
+    """Crée un clavier pour la navigation des top animes"""
+    filter_buttons = [
+        [
+            InlineKeyboardButton("🎯 Tous", callback_data="top_all_1"),
+            InlineKeyboardButton("📡 En cours", callback_data="top_airing_1"),
+            InlineKeyboardButton("🔮 À venir", callback_data="top_upcoming_1"),
+        ],
+        [
+            InlineKeyboardButton("📺 Séries", callback_data="top_tv_1"),
+            InlineKeyboardButton("🎬 Films", callback_data="top_movie_1"),
+            InlineKeyboardButton("💎 OVA", callback_data="top_ova_1"),
+        ],
+        [
+            InlineKeyboardButton("⭐ Populaires", callback_data="top_bypopularity_1"),
+            InlineKeyboardButton("❤️ Favoris", callback_data="top_favorite_1"),
+        ]
+    ]
+    
+    # Navigation des pages
+    navigation_buttons = []
+    if current_page > 1:
+        navigation_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"top_{current_filter}_{current_page-1}"))
+    
+    navigation_buttons.append(InlineKeyboardButton(f"{current_page}/{total_pages}", callback_data="noop"))
+    
+    if current_page < total_pages:
+        navigation_buttons.append(InlineKeyboardButton("➡️", callback_data=f"top_{current_filter}_{current_page+1}"))
+    
+    if navigation_buttons:
+        filter_buttons.append(navigation_buttons)
+    
+    return InlineKeyboardMarkup(filter_buttons)
+
+def create_schedule_keyboard():
+    """Crée un clavier pour la navigation du planning"""
+    days = [
+        [
+            InlineKeyboardButton("📅 Aujourd'hui", callback_data="schedule_today"),
+            InlineKeyboardButton("📅 Semaine", callback_data="schedule_week"),
+        ],
+        [
+            InlineKeyboardButton("🗓️ Lundi", callback_data="schedule_monday"),
+            InlineKeyboardButton("🗓️ Mardi", callback_data="schedule_tuesday"),
+            InlineKeyboardButton("🗓️ Mercredi", callback_data="schedule_wednesday"),
+        ],
+        [
+            InlineKeyboardButton("🗓️ Jeudi", callback_data="schedule_thursday"),
+            InlineKeyboardButton("🗓️ Vendredi", callback_data="schedule_friday"),
+            InlineKeyboardButton("🗓️ Samedi", callback_data="schedule_saturday"),
+        ],
+        [
+            InlineKeyboardButton("🗓️ Dimanche", callback_data="schedule_sunday"),
+        ]
+    ]
+    return InlineKeyboardMarkup(days)
+
+# ──────────────────────────
+# Claviers inline pour les sous-pages
+# ──────────────────────────
+def create_back_button_keyboard(anime_id):
+    """Crée un clavier avec uniquement le bouton Retour"""
+    keyboard = [
+        [InlineKeyboardButton("🔙 Retour à l'anime", callback_data=f"anime_{anime_id}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def create_similar_animes_keyboard(similar_animes, original_anime_id):
+    """Crée un clavier pour les animes similaires avec bouton retour"""
+    keyboard = []
+    for anime in similar_animes:
+        title = decode_html_entities(anime.get("title", "Sans titre"))
+        if len(title) > 35:
+            title = title[:32] + "..."
+        keyboard.append([InlineKeyboardButton(title, callback_data=f"anime_{anime['mal_id']}")])
+    
+    # Ajouter le bouton retour
+    keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data=f"anime_{original_anime_id}")])
+    
+    return InlineKeyboardMarkup(keyboard)
+
 # ──────────────────────────
 # Commandes
 # ──────────────────────────
@@ -305,11 +553,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🎯 Recommandations d'animes similaires\n"
         "• 📅 Recherche par saison\n"
         "• 👤 Recherche de personnages\n"
+        "• 🏆 Top animes\n"
+        "• 🎲 Anime aléatoire\n"
+        "• 📅 Planning des sorties\n"
         "• 👥 Fonctionne dans les groupes et en privé\n\n"
         "💡 <b>Commandes disponibles :</b>\n"
         "• Tapez le nom d'un anime pour le rechercher\n"
         "• <code>/saison &lt;année&gt; &lt;saison&gt;</code> (ex : <code>/saison 2023 fall</code>)\n"
         "• <code>/personnage &lt;nom&gt;</code> (ex : <code>/personnage Naruto</code>)\n"
+        "• <code>/top</code> - Liste des meilleurs animes\n"
+        "• <code>/random</code> - Anime aléatoire\n"
+        "• <code>/planning</code> - Planning des sorties\n"
         "• <code>/anime &lt;nom&gt;</code> ou <code>/recherche &lt;nom&gt;</code>"
     )
     await update.message.reply_text(welcome_text, parse_mode="HTML", reply_markup=reply_markup)
@@ -326,8 +580,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👤 <b>Recherche de personnages :</b>\n"
         "• <code>/personnage &lt;nom&gt;</code>\n"
         "• ex : <code>/personnage Naruto</code>\n\n"
+        "🏆 <b>Top animes :</b>\n"
+        "• <code>/top</code> - Liste des meilleurs animes\n\n"
+        "🎲 <b>Anime aléatoire :</b>\n"
+        "• <code>/random</code> - Découvrir un anime au hasard\n\n"
+        "📅 <b>Planning des sorties :</b>\n"
+        "• <code>/planning</code> - Voir les sorties de la semaine\n\n"
         "🎯 <b>Navigation interactive :</b>\n"
-        "• Boutons : Synopsis, Détails, Studio, Trailer, Similaires\n\n"
+        "• Boutons : Synopsis, Détails, Studio, Trailer, Similaires, Streaming\n\n"
         "👥 <b>Groupes :</b>\n"
         "• Mentionne-moi puis écris le nom de l'anime"
     )
@@ -399,6 +659,56 @@ async def character_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard,
         )
 
+async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche les top animes avec filtres"""
+    await update.message.reply_chat_action(action="typing")
+    
+    # Récupérer les top animes (par défaut: tous)
+    anime_list, total_pages = get_top_anime("all", 1)
+    
+    if not anime_list:
+        await update.message.reply_text("❌ Impossible de charger les top animes.", parse_mode="HTML")
+        return
+    
+    text = format_top_anime_list(anime_list, "all", 1, total_pages)
+    keyboard = create_top_anime_keyboard("all", 1, total_pages)
+    
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+async def random_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche un anime aléatoire"""
+    await update.message.reply_chat_action(action="typing")
+    
+    anime = get_random_anime()
+    if not anime:
+        await update.message.reply_text("❌ Impossible de charger un anime aléatoire.", parse_mode="HTML")
+        return
+    
+    await display_anime_with_navigation(update, anime)
+
+async def planning_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche le planning des sorties"""
+    await update.message.reply_chat_action(action="typing")
+    
+    # Déterminer le jour actuel si non spécifié
+    day = context.args[0].lower() if context.args else None
+    day_names = {
+        "monday": "lundi", "tuesday": "mardi", "wednesday": "mercredi",
+        "thursday": "jeudi", "friday": "vendredi", "saturday": "samedi",
+        "sunday": "dimanche"
+    }
+    
+    # Si "today" est demandé, déterminer le jour actuel
+    if day == "today":
+        today = datetime.now().strftime("%A").lower()
+        day = today
+    
+    schedule = get_schedule(day)
+    text = format_schedule(schedule, day)
+    keyboard = create_schedule_keyboard()
+    
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+
 # ──────────────────────────
 # Affichages
 # ──────────────────────────
@@ -432,7 +742,7 @@ async def display_anime_with_navigation(update_or_query, anime, edit_message=Fal
 
     try:
         if edit_message and query:
-            # En cas d'édition, on renvoie un nouveau message si l’API refuse l’edit
+            # En cas d'édition, on renvoie un nouveau message si l'API refuse l'edit
             await query.edit_message_caption(caption=caption, parse_mode="HTML", reply_markup=keyboard)
         else:
             await message.reply_photo(photo=image_url, caption=caption, parse_mode="HTML", reply_markup=keyboard)
@@ -478,30 +788,6 @@ async def perform_search(update: Update, query: str, context: ContextTypes.DEFAU
             parse_mode="HTML",
             reply_markup=keyboard,
         )
-
-# ──────────────────────────
-# Claviers inline pour les sous-pages
-# ──────────────────────────
-def create_back_button_keyboard(anime_id):
-    """Crée un clavier avec uniquement le bouton Retour"""
-    keyboard = [
-        [InlineKeyboardButton("🔙 Retour à l'anime", callback_data=f"anime_{anime_id}")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-def create_similar_animes_keyboard(similar_animes, original_anime_id):
-    """Crée un clavier pour les animes similaires avec bouton retour"""
-    keyboard = []
-    for anime in similar_animes:
-        title = decode_html_entities(anime.get("title", "Sans titre"))
-        if len(title) > 35:
-            title = title[:32] + "..."
-        keyboard.append([InlineKeyboardButton(title, callback_data=f"anime_{anime['mal_id']}")])
-    
-    # Ajouter le bouton retour
-    keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data=f"anime_{original_anime_id}")])
-    
-    return InlineKeyboardMarkup(keyboard)
 
 # ──────────────────────────
 # Boutons inline
@@ -633,12 +919,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         anime_id = data.split("_")[1]
         anime = get_anime_by_id(anime_id)
         if anime:
-            streaming_text = format_streaming_links(anime)
+            # Vérifier la disponibilité sur les sites de streaming
+            streaming_links = await check_streaming_availability(anime.get("title", ""))
+            streaming_text = format_streaming_links(anime, streaming_links)
             
             # Créer un clavier avec des boutons de liens
-            streaming_links = generate_watch_links(anime.get("title", ""))
             keyboard = []
-            for site_name, url in streaming_links:
+            for site_name, url in streaming_links.items():
                 keyboard.append([InlineKeyboardButton(site_name, url=url)])
             
             # Ajouter un bouton retour
@@ -649,12 +936,45 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.message.reply_text("❌ Impossible de charger les liens de streaming.", parse_mode="HTML")
 
+    elif data.startswith("top_"):
+        # Gestion des top animes
+        parts = data.split("_")
+        if len(parts) >= 3:
+            filter_type = parts[1]
+            page = int(parts[2])
+            
+            anime_list, total_pages = get_top_anime(filter_type, page)
+            
+            if anime_list:
+                text = format_top_anime_list(anime_list, filter_type, page, total_pages)
+                keyboard = create_top_anime_keyboard(filter_type, page, total_pages)
+                await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+            else:
+                await query.answer("❌ Impossible de charger les top animes.")
+
+    elif data.startswith("schedule_"):
+        # Gestion du planning
+        day = data.split("_")[1]
+        
+        if day == "today":
+            today = datetime.now().strftime("%A").lower()
+            day = today
+        elif day == "week":
+            day = None
+        
+        schedule = get_schedule(day)
+        text = format_schedule(schedule, day)
+        keyboard = create_schedule_keyboard()
+        
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+
 # ──────────────────────────
 # Messages & erreurs
 # ──────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type in ["group", "supergroup"]:
         if context.bot.username and f"@{context.bot.username}" in update.message.text:
+            # Extraire le query après la mention du bot
             query = update.message.text.replace(f"@{context.bot.username}", "").strip()
             if query:
                 await perform_search(update, query, context)
@@ -691,6 +1011,9 @@ def main():
     app.add_handler(CommandHandler("saison", season_command))
     app.add_handler(CommandHandler("personnage", character_command))
     app.add_handler(CommandHandler("character", character_command))  # alias
+    app.add_handler(CommandHandler("top", top_command))
+    app.add_handler(CommandHandler("random", random_command))
+    app.add_handler(CommandHandler("planning", planning_command))
 
     # Inline & messages
     app.add_handler(CallbackQueryHandler(button_handler))
