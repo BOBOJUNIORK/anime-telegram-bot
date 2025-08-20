@@ -7,7 +7,8 @@ import requests
 import random
 import asyncio
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
+import json
 
 from telegram import (
     Update,
@@ -28,7 +29,8 @@ from deep_translator import GoogleTranslator
 # Logging
 # ──────────────────────────
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,13 @@ STREAMING_SITES = [
         "anime_url": "https://www.anime-ultime.net/anime-{id}-0/infos.html"
     }
 ]
+
+# Configuration Nautiljon
+NAUTILJON_BASE_URL = "https://www.nautiljon.com"
+NAUTILJON_SEARCH_URL = f"{NAUTILJON_BASE_URL}/recherche/"
+
+# Cache pour les recherches Nautiljon
+nautiljon_cache = {}
 
 # ──────────────────────────
 # Utilitaires de texte
@@ -230,16 +239,78 @@ def get_schedule(day=None):
     except requests.exceptions.RequestException as e:
         logger.error(f"Erreur de connexion (schedule): {e}")
     return []
-def get_character_by_id(character_id):
-    """Récupère les détails complets d'un personnage par son ID"""
-    url = f"https://api.jikan.moe/v4/characters/{character_id}/full"
+
+# ──────────────────────────
+# Intégration Nautiljon
+# ──────────────────────────
+def search_nautiljon(query, search_type="anime"):
+    """Recherche sur Nautiljon et retourne les résultats"""
+    if query in nautiljon_cache:
+        return nautiljon_cache[query]
+    
+    params = {
+        'mot': query,
+        'type': search_type
+    }
+    
     try:
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            return r.json().get("data")
-        logger.error(f"Erreur API Jikan (character): {r.status_code}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Erreur de connexion (character): {e}")
+        url = f"{NAUTILJON_SEARCH_URL}?{urlencode(params)}"
+        response = requests.get(url, timeout=10, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        if response.status_code == 200:
+            # Extraction basique des résultats (simplifié)
+            results = []
+            pattern = r'<a href="(/[\w/-]+)" title="([^"]+)">'
+            matches = re.findall(pattern, response.text)
+            
+            for href, title in matches[:5]:  # Limiter à 5 résultats
+                if "/mangas/" in href or "/anime/" in href or "/personnages/" in href:
+                    results.append({
+                        'title': decode_html_entities(title),
+                        'url': f"{NAUTILJON_BASE_URL}{href}"
+                    })
+            
+            nautiljon_cache[query] = results
+            return results
+    except Exception as e:
+        logger.error(f"Erreur recherche Nautiljon: {e}")
+    
+    return []
+
+def get_nautiljon_character_info(character_name):
+    """Récupère les informations détaillées d'un personnage sur Nautiljon"""
+    results = search_nautiljon(character_name, "personnages")
+    if results:
+        # Prendre le premier résultat
+        character_url = results[0]['url']
+        
+        try:
+            response = requests.get(character_url, timeout=10, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            
+            if response.status_code == 200:
+                # Extraction des informations de base (simplifié)
+                html_content = response.text
+                
+                # Extraction de la description
+                description_match = re.search(r'<div class="description[^>]*>(.*?)</div>', html_content, re.DOTALL)
+                description = description_match.group(1).strip() if description_match else "Aucune description disponible"
+                
+                # Nettoyage du HTML
+                description = re.sub(r'<[^>]+>', '', description)
+                description = re.sub(r'\s+', ' ', description).strip()
+                
+                return {
+                    'name': results[0]['title'],
+                    'url': character_url,
+                    'description': description[:1000] + "..." if len(description) > 1000 else description
+                }
+        except Exception as e:
+            logger.error(f"Erreur chargement personnage Nautiljon: {e}")
+    
     return None
 
 # ──────────────────────────
@@ -345,7 +416,7 @@ def format_studio_info(anime):
         f"👔 <b>Producteur(s)</b> : {producer_text}"
     )
 
-def format_character_info(character):
+def format_character_info(character, nautiljon_data=None):
     """Formatage amélioré des informations sur les personnages"""
     name = escape_html(decode_html_entities(character.get("name", "Nom inconnu")))
     name_kanji = escape_html(decode_html_entities(character.get("name_kanji", "")))
@@ -354,9 +425,12 @@ def format_character_info(character):
     # Récupérer les informations supplémentaires si disponibles
     nicknames = character.get("nicknames", [])
     favorites = character.get("favorites", 0)
-    mangaography = character.get("mangaography", [])
     animeography = character.get("animeography", [])
     voice_actors = character.get("voices", []) if isinstance(character.get("voices"), list) else []
+    
+    # Utiliser les données Nautiljon si disponibles
+    if nautiljon_data:
+        about = nautiljon_data.get('description', about)
     
     # Traduire la description
     try:
@@ -385,7 +459,7 @@ def format_character_info(character):
     if about_fr:
         text += f"\n\n📝 <b>Description</b>:\n{about_fr}"
     
-    # Ajouter les anime et manga importants
+    # Ajouter les anime principaux
     if animeography:
         main_anime = [a for a in animeography if a.get("role") == "Main"]
         if main_anime:
@@ -395,7 +469,12 @@ def format_character_info(character):
     if voice_actors:
         japanese_va = [va for va in voice_actors if va.get('language') == 'Japanese']
         if japanese_va:
-            text += f"\n🎙️ <b>Seiyuu</b>: {escape_html(japanese_va[0].get('person', {}).get('name', 'Inconnu'))}"
+            va_name = japanese_va[0].get('person', {}).get('name', 'Inconnu')
+            text += f"\n🎙️ <b>Seiyuu</b>: {escape_html(va_name)}"
+    
+    # Ajouter le lien Nautiljon si disponible
+    if nautiljon_data:
+        text += f"\n\n🔗 <a href='{nautiljon_data['url']}'>Voir plus sur Nautiljon</a>"
     
     return text
 
@@ -727,7 +806,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📅 <b>Planning des sorties :</b>\n"
         "• <code>/planning</code> - Voir les sorties de la semaine\n\n"
         "🎯 <b>Navigation interactive :</b>\n"
-        "• Boutons : Synopsis, Détails, Studio, Trailer, Similaires, Streaming\n\n"
+        "• Boutons : Synopsis, Détails, Studio, Trailer, Personnages, Similaires, Streaming\n\n"
         "👥 <b>Groupes :</b>\n"
         "• Mentionne-moi puis écris le nom de l'anime"
     )
@@ -761,7 +840,7 @@ async def season_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Aucun anime trouvé pour {season} {year}.", parse_mode="HTML")
         return
 
-    context.user_data[f"season_results_{year}_{season}"] = results
+    context.user_data[f"season_results_{year}_{season"] = results
 
     season_names = {"spring": "Printemps", "summer": "Été", "fall": "Automne", "winter": "Hiver"}
     keyboard = create_search_pagination_keyboard(results, 0, f"{year}_{season}", "anime")
@@ -853,8 +932,12 @@ async def planning_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Affichages
 # ──────────────────────────
 async def display_character_info(update_or_query, character):
+    # Récupérer les données Nautiljon pour enrichir la description
+    character_name = character.get("name", "")
+    nautiljon_data = get_nautiljon_character_info(character_name)
+    
+    info_text = format_character_info(character, nautiljon_data)
     image_url = character["images"]["jpg"]["image_url"]
-    info_text = format_character_info(character)
 
     if hasattr(update_or_query, "callback_query") and update_or_query.callback_query:
         message = update_or_query.callback_query.message
@@ -1161,7 +1244,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 reply_markup = None
                 
-            info_text = format_character_info(character)
+            # Récupérer les données Nautiljon pour enrichir la description
+            character_name = character.get("name", "")
+            nautiljon_data = get_nautiljon_character_info(character_name)
+            
+            info_text = format_character_info(character, nautiljon_data)
             image_url = character.get("images", {}).get("jpg", {}).get("image_url")
             
             if image_url:
