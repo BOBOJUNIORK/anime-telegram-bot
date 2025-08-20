@@ -5,12 +5,13 @@ from deep_translator import GoogleTranslator
 import logging
 import html
 import math
+import os
 
 # Configuration du logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN = "7547787473:AAH35nCR9ydI0CUGIlzSgXB71HJKj1N1w8w"
+TOKEN = os.getenv("TOKEN")
 
 # ----------------------------
 # Fonction de décodage HTML
