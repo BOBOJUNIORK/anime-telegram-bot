@@ -200,21 +200,43 @@ def format_character_info(character):
     title = f"{name} ({name_kanji})" if name_kanji else name
     return f"👤 <b>{title}</b>\n\n📝 <b>Description</b>:\n{about_fr}"
 
-def format_streaming_links(anime):
-    titre = anime.get("title", "Cet anime")
-    query = re.sub(r"[^a-zA-Z0-9\s]", "", titre)  # nettoyer un peu le titre
-    query_encoded = query.replace(" ", "+")
-
-    links = [
-        f"🔗 <a href='https://voiranime.com/?s={query_encoded}'>Voiranime</a>",
-        f"🔗 <a href='https://anime-sama.fr/catalogue/?s={query_encoded}'>Anime-sama</a>",
-        f"🔗 <a href='https://franime.fr/?s={query_encoded}'>Franime</a>",
+# ──────────────────────────
+# Liens de streaming
+# ──────────────────────────
+def generate_watch_links(anime_title):
+    """Génère des liens de recherche vers les sites de streaming français"""
+    encoded_title = requests.utils.quote(anime_title)
+    
+    sites = [
+        ("VoirAnime", f"https://voiranime.com/?s={encoded_title}"),
+        ("Anime-Sama", f"https://www.anime-sama.fr/search/?q={encoded_title}"),
+        ("French-Anime", f"https://french-anime.com/search?q={encoded_title}"),
+        ("Franime", f"https://franime.fr/?s={encoded_title}"),
+        ("Anime-Ultime", f"https://www.anime-ultime.net/search-0-0-{encoded_title}.html"),
     ]
+    
+    return sites
 
-    return f"▶️ <b>Visionnage possible</b> pour <b>{escape_html(titre)}</b> :\n\n" + "\n".join(links)
+def format_streaming_links(anime):
+    """Formate les liens de streaming pour l'anime"""
+    titre = escape_html(decode_html_entities(anime.get("title", "Titre inconnu")))
+    
+    # Générer les liens de recherche
+    streaming_links = generate_watch_links(anime.get("title", ""))
+    
+    # Créer le texte avec les liens
+    text = f"📺 <b>Regarder {titre}</b>:\n\n"
+    text += "Voici où vous pourriez trouver cet anime:\n\n"
+    
+    for site_name, url in streaming_links:
+        text += f"• <a href='{escape_html(url)}'>{escape_html(site_name)}</a>\n"
+    
+    text += "\n🔍 <i>Note: Ces liens mènent à des pages de recherche. La disponibilité peut varier.</i>"
+    
+    return text
 
 # ──────────────────────────
-# Claviers inline
+# Claviers inline 
 # ──────────────────────────
 def create_anime_navigation_keyboard(anime_id):
     keyboard = [
@@ -227,8 +249,8 @@ def create_anime_navigation_keyboard(anime_id):
             InlineKeyboardButton("🎬 Trailer", callback_data=f"trailer_{anime_id}"),
         ],
         [
-            InlineKeyboardButton("🎯 Animes similaires", callback_data=f"similar_{anime_id}"),
-            InlineKeyboardButton("▶️ Visionnage", callback_data=f"watch_{anime_id}"),
+            InlineKeyboardButton("🎯 Similaires", callback_data=f"similar_{anime_id}"),
+            InlineKeyboardButton("📺 Streaming", callback_data=f"streaming_{anime_id}"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -547,15 +569,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.message.reply_text("❌ Impossible de charger le trailer.", parse_mode="HTML")
 
-    elif data.startswith("watch_"):
-        anime_id = data.split("_")[1]
-        anime = get_anime_by_id(anime_id)
-        if anime:
-            watch_text = format_streaming_links(anime)
-            await query.message.reply_text(watch_text, parse_mode="HTML", disable_web_page_preview=True)
-        else:
-            await query.message.reply_text("❌ Impossible de générer les liens de visionnage.", parse_mode="HTML")
-
     elif data.startswith("similar_"):
         anime_id = int(data.split("_")[1])
         anime = get_anime_by_id(anime_id)
@@ -578,6 +591,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("❌ Aucune recommandation trouvée.", parse_mode="HTML")
         else:
             await query.message.reply_text("❌ Impossible de charger les recommandations.", parse_mode="HTML")
+
+    elif data.startswith("streaming_"):
+        anime_id = data.split("_")[1]
+        anime = get_anime_by_id(anime_id)
+        if anime:
+            streaming_text = format_streaming_links(anime)
+            
+            # Créer un clavier avec des boutons de liens
+            streaming_links = generate_watch_links(anime.get("title", ""))
+            keyboard = []
+            for site_name, url in streaming_links:
+                keyboard.append([InlineKeyboardButton(site_name, url=url)])
+            
+            # Ajouter un bouton retour
+            keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data=f"anime_{anime_id}")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.message.reply_text(streaming_text, parse_mode="HTML", reply_markup=reply_markup)
+        else:
+            await query.message.reply_text("❌ Impossible de charger les liens de streaming.", parse_mode="HTML")
 
 # ──────────────────────────
 # Messages & erreurs
