@@ -840,7 +840,7 @@ async def season_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Aucun anime trouvé pour {season} {year}.", parse_mode="HTML")
         return
 
-    context.user_data[f"season_results_{year}_{season"] = results
+    context.user_data[f"season_results_{year}_{season}"] = results
 
     season_names = {"spring": "Printemps", "summer": "Été", "fall": "Automne", "winter": "Hiver"}
     keyboard = create_search_pagination_keyboard(results, 0, f"{year}_{season}", "anime")
