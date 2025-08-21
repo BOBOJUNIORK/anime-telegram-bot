@@ -496,6 +496,12 @@ class AnimeDatabase:
         studios_json = json.dumps([s['name'] for s in anime_data.get('studios', [])])
         producers_json = json.dumps([p['name'] for p in anime_data.get('producers', [])])
         
+        # Gérer les images correctement
+        images = anime_data.get('images', {})
+        image_url = None
+        if images.get('jpg'):
+            image_url = images['jpg'].get('large_image_url') or images['jpg'].get('image_url')
+        
         cursor.execute('''
             INSERT OR REPLACE INTO anime_cache 
             (anime_id, title, title_japanese, title_english, image_url, synopsis, 
@@ -506,7 +512,7 @@ class AnimeDatabase:
             anime_data.get('title'),
             anime_data.get('title_japanese'),
             anime_data.get('title_english'),
-            anime_data.get('images', {}).get('jpg', {}).get('image_url'),
+            image_url,
             anime_data.get('synopsis'),
             anime_data.get('score'),
             anime_data.get('episodes'),
@@ -542,7 +548,7 @@ class AnimeDatabase:
                 'title': row[1],
                 'title_japanese': row[2],
                 'title_english': row[3],
-                'images': {'jpg': {'image_url': row[4]}},
+                'images': {'jpg': {'image_url': row[4], 'large_image_url': row[4]}},
                 'synopsis': row[5],
                 'score': row[6],
                 'episodes': row[7],
@@ -566,6 +572,12 @@ class AnimeDatabase:
         animeography_json = json.dumps(character_data.get('animeography', []))
         voice_actors_json = json.dumps(character_data.get('voices', []))
         
+        # Gérer les images correctement
+        images = character_data.get('images', {})
+        image_url = None
+        if images.get('jpg'):
+            image_url = images['jpg'].get('image_url')
+        
         cursor.execute('''
             INSERT OR REPLACE INTO character_cache 
             (character_id, name, name_kanji, about, image_url, favorites, animeography, voice_actors)
@@ -575,7 +587,7 @@ class AnimeDatabase:
             character_data.get('name'),
             character_data.get('name_kanji'),
             character_data.get('about'),
-            character_data.get('images', {}).get('jpg', {}).get('image_url'),
+            image_url,
             character_data.get('favorites'),
             animeography_json,
             voice_actors_json
@@ -1154,7 +1166,7 @@ def format_character_info(character, nautiljon_data=None):
     try:
         if about and about != "Pas d'informations disponibles":
             # Utiliser plus de texte pour une meilleure description
-            about_to_translate = about[:2000]  # Augmenter la limite
+            about_to_translate = about[:1500]  # Augmenter la limite
             about_fr = GoogleTranslator(source="auto", target="fr").translate(about_to_translate)
         else:
             about_fr = about
@@ -1164,7 +1176,7 @@ def format_character_info(character, nautiljon_data=None):
     
     about_fr = escape_html(about_fr)
     
-    # Construction du texte
+    # Construction du texte (limité à 1024 caractères pour Telegram)
     text = f"👤 <b>{name}</b>"
     if name_kanji:
         text += f" ({name_kanji})"
@@ -1175,6 +1187,8 @@ def format_character_info(character, nautiljon_data=None):
     text += f"\n❤️ <b>Favoris</b>: {favorites}"
     
     if about_fr:
+        # Limiter la description pour éviter les erreurs de longueur
+        about_fr = truncate(about_fr, 800)
         text += f"\n\n📝 <b>Description</b>:\n{about_fr}"
     
     # Ajouter les anime principaux
@@ -1194,7 +1208,7 @@ def format_character_info(character, nautiljon_data=None):
     if nautiljon_data:
         text += f"\n\n🔗 <a href='{nautiljon_data['url']}'>Voir plus sur Nautiljon</a>"
     
-    return text
+    return truncate(text, 1024)  # S'assurer que le texte ne dépasse pas la limite
 
 def format_anime_characters_list(anime_title, characters):
     """Formate la liste des personnages d'un anime"""
@@ -1786,7 +1800,7 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Affiche les top animes avec filtres"""
     await update.message.reply_chat_action(action="typing")
     
-    # Récupérer les top animes (par défaut: tous)
+    # Récupérer les top animes (par défault: tous)
     anime_list, total_pages = get_top_anime("all", 1)
     
     if not anime_list:
@@ -1841,7 +1855,12 @@ async def display_character_info(update_or_query, character):
     nautiljon_data = get_nautiljon_character_info(character_name)
     
     info_text = format_character_info(character, nautiljon_data)
-    image_url = character["images"]["jpg"]["image_url"]
+    
+    # Gérer correctement l'URL de l'image
+    images = character.get("images", {})
+    image_url = None
+    if images.get('jpg'):
+        image_url = images['jpg'].get('image_url')
 
     if hasattr(update_or_query, "callback_query") and update_or_query.callback_query:
         message = update_or_query.callback_query.message
@@ -1850,7 +1869,10 @@ async def display_character_info(update_or_query, character):
     else:
         message = update_or_query.message
 
-    await message.reply_photo(photo=image_url, caption=info_text, parse_mode="HTML")
+    if image_url:
+        await message.reply_photo(photo=image_url, caption=info_text, parse_mode="HTML")
+    else:
+        await message.reply_text(info_text, parse_mode="HTML")
 
 async def display_anime_with_navigation(update_or_query, anime, edit_message=False):
     user_id = None
@@ -1859,7 +1881,12 @@ async def display_anime_with_navigation(update_or_query, anime, edit_message=Fal
     elif hasattr(update_or_query, 'message') and update_or_query.message:
         user_id = update_or_query.message.from_user.id
     
-    image_url = anime["images"]["jpg"]["large_image_url"]
+    # Gérer correctement l'URL de l'image
+    images = anime.get("images", {})
+    image_url = None
+    if images.get('jpg'):
+        image_url = images['jpg'].get('large_image_url') or images['jpg'].get('image_url')
+    
     caption = format_anime_basic_info(anime, user_id)
     keyboard = create_anime_navigation_keyboard(anime["mal_id"], user_id)
 
@@ -1878,10 +1905,16 @@ async def display_anime_with_navigation(update_or_query, anime, edit_message=Fal
             # En cas d'édition, on renvoie un nouveau message si l'API refuse l'edit
             await query.edit_message_caption(caption=caption, parse_mode="HTML", reply_markup=keyboard)
         else:
-            await message.reply_photo(photo=image_url, caption=caption, parse_mode="HTML", reply_markup=keyboard)
+            if image_url:
+                await message.reply_photo(photo=image_url, caption=caption, parse_mode="HTML", reply_markup=keyboard)
+            else:
+                await message.reply_text(caption, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
         logger.error(f"Erreur lors de l'affichage de l'anime: {e}")
-        await message.reply_photo(photo=image_url, caption=caption, parse_mode="HTML", reply_markup=keyboard)
+        if image_url:
+            await message.reply_photo(photo=image_url, caption=caption, parse_mode="HTML", reply_markup=keyboard)
+        else:
+            await message.reply_text(caption, parse_mode="HTML", reply_markup=keyboard)
 
 # ──────────────────────────
 # Recherche & messages
@@ -2164,7 +2197,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             nautiljon_data = get_nautiljon_character_info(character_name)
             
             info_text = format_character_info(character, nautiljon_data)
-            image_url = character.get("images", {}).get("jpg", {}).get("image_url")
+            
+            # Gérer correctement l'URL de l'image
+            images = character.get("images", {})
+            image_url = None
+            if images.get('jpg'):
+                image_url = images['jpg'].get('image_url')
             
             if image_url:
                 await query.message.reply_photo(
