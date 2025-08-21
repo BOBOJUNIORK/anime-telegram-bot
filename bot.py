@@ -6,9 +6,11 @@ import html
 import requests
 import random
 import asyncio
+import sqlite3
+import json
 from datetime import datetime
 from urllib.parse import quote, urlencode
-import json
+from typing import Dict, List, Set, Optional
 
 from telegram import (
     Update,
@@ -83,6 +85,676 @@ NAUTILJON_SEARCH_URL = f"{NAUTILJON_BASE_URL}/recherche/"
 nautiljon_cache = {}
 
 # ──────────────────────────
+# Base de données
+# ──────────────────────────
+class AnimeDatabase:
+    def __init__(self, db_path="anime_bot.db"):
+        self.db_path = db_path
+        self.init_db()
+    
+    def init_db(self):
+        """Initialise la base de données avec les tables nécessaires"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Table des utilisateurs
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                language_code TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Table des favoris
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS favorites (
+                user_id INTEGER,
+                anime_id INTEGER,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, anime_id),
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        ''')
+        
+        # Table des listes de visionnage
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS watchlists (
+                user_id INTEGER,
+                anime_id INTEGER,
+                status TEXT CHECK(status IN ('plan_to_watch', 'watching', 'completed', 'dropped')),
+                score INTEGER CHECK(score >= 0 AND score <= 10),
+                progress INTEGER DEFAULT 0,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, anime_id),
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        ''')
+        
+        # Table des listes personnalisées
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS custom_lists (
+                list_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                list_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        ''')
+        
+        # Table des animes dans les listes personnalisées
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS custom_list_items (
+                list_id INTEGER,
+                anime_id INTEGER,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (list_id, anime_id),
+                FOREIGN KEY (list_id) REFERENCES custom_lists (list_id)
+            )
+        ''')
+        
+        # Table des achievements
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS achievements (
+                achievement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                achievement_type TEXT,
+                achievement_name TEXT,
+                achieved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        ''')
+        
+        # Table du cache des animes
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS anime_cache (
+                anime_id INTEGER PRIMARY KEY,
+                title TEXT,
+                title_japanese TEXT,
+                title_english TEXT,
+                image_url TEXT,
+                synopsis TEXT,
+                score REAL,
+                episodes INTEGER,
+                status TEXT,
+                year INTEGER,
+                genres TEXT,
+                studios TEXT,
+                producers TEXT,
+                duration TEXT,
+                rating TEXT,
+                source TEXT,
+                cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Table du cache des personnages
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS character_cache (
+                character_id INTEGER PRIMARY KEY,
+                name TEXT,
+                name_kanji TEXT,
+                about TEXT,
+                image_url TEXT,
+                favorites INTEGER,
+                animeography TEXT,
+                voice_actors TEXT,
+                cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def add_user(self, user_id, username, first_name, last_name, language_code):
+        """Ajoute un utilisateur à la base de données"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, language_code)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, username, first_name, last_name, language_code))
+        
+        conn.commit()
+        conn.close()
+    
+    def add_to_favorites(self, user_id, anime_id):
+        """Ajoute un anime aux favoris de l'utilisateur"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO favorites (user_id, anime_id)
+            VALUES (?, ?)
+        ''', (user_id, anime_id))
+        
+        conn.commit()
+        conn.close()
+    
+    def remove_from_favorites(self, user_id, anime_id):
+        """Retire un anime des favoris de l'utilisateur"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            DELETE FROM favorites 
+            WHERE user_id = ? AND anime_id = ?
+        ''', (user_id, anime_id))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_favorites(self, user_id):
+        """Récupère les favoris de l'utilisateur"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT anime_id FROM favorites 
+            WHERE user_id = ?
+            ORDER BY added_at DESC
+        ''', (user_id,))
+        
+        results = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        
+        return results
+    
+    def is_favorite(self, user_id, anime_id):
+        """Vérifie si un anime est dans les favoris de l'utilisateur"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT COUNT(*) FROM favorites 
+            WHERE user_id = ? AND anime_id = ?
+        ''', (user_id, anime_id))
+        
+        result = cursor.fetchone()[0] > 0
+        conn.close()
+        
+        return result
+    
+    def update_watchlist(self, user_id, anime_id, status, score=None, progress=None):
+        """Met à jour la liste de visionnage de l'utilisateur"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        if score is not None and progress is not None:
+            cursor.execute('''
+                INSERT OR REPLACE INTO watchlists (user_id, anime_id, status, score, progress, updated_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (user_id, anime_id, status, score, progress))
+        elif score is not None:
+            cursor.execute('''
+                INSERT OR REPLACE INTO watchlists (user_id, anime_id, status, score, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (user_id, anime_id, status, score))
+        elif progress is not None:
+            cursor.execute('''
+                INSERT OR REPLACE INTO watchlists (user_id, anime_id, status, progress, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (user_id, anime_id, status, progress))
+        else:
+            cursor.execute('''
+                INSERT OR REPLACE INTO watchlists (user_id, anime_id, status, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (user_id, anime_id, status))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_watchlist(self, user_id, status=None):
+        """Récupère la liste de visionnage de l'utilisateur"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        if status:
+            cursor.execute('''
+                SELECT anime_id, status, score, progress FROM watchlists 
+                WHERE user_id = ? AND status = ?
+                ORDER BY updated_at DESC
+            ''', (user_id, status))
+        else:
+            cursor.execute('''
+                SELECT anime_id, status, score, progress FROM watchlists 
+                WHERE user_id = ?
+                ORDER BY updated_at DESC
+            ''', (user_id,))
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                'anime_id': row[0],
+                'status': row[1],
+                'score': row[2],
+                'progress': row[3]
+            })
+        
+        conn.close()
+        return results
+    
+    def get_watch_status(self, user_id, anime_id):
+        """Récupère le statut de visionnage d'un anime pour un utilisateur"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT status, score, progress FROM watchlists 
+            WHERE user_id = ? AND anime_id = ?
+        ''', (user_id, anime_id))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return {
+                'status': result[0],
+                'score': result[1],
+                'progress': result[2]
+            }
+        return None
+    
+    def create_custom_list(self, user_id, list_name):
+        """Crée une liste personnalisée pour l'utilisateur"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT INTO custom_lists (user_id, list_name)
+            VALUES (?, ?)
+        ''', (user_id, list_name))
+        
+        list_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+        
+        return list_id
+    
+    def add_to_custom_list(self, list_id, anime_id):
+        """Ajoute un anime à une liste personnalisée"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR IGNORE INTO custom_list_items (list_id, anime_id)
+            VALUES (?, ?)
+        ''', (list_id, anime_id))
+        
+        conn.commit()
+        conn.close()
+    
+    def remove_from_custom_list(self, list_id, anime_id):
+        """Retire un anime d'une liste personnalisée"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            DELETE FROM custom_list_items 
+            WHERE list_id = ? AND anime_id = ?
+        ''', (list_id, anime_id))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_custom_lists(self, user_id):
+        """Récupère les listes personnalisées de l'utilisateur"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT list_id, list_name FROM custom_lists 
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+        ''', (user_id,))
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                'list_id': row[0],
+                'list_name': row[1]
+            })
+        
+        conn.close()
+        return results
+    
+    def get_custom_list_items(self, list_id):
+        """Récupère les animes d'une liste personnalisée"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT anime_id FROM custom_list_items 
+            WHERE list_id = ?
+            ORDER BY added_at DESC
+        ''', (list_id,))
+        
+        results = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        
+        return results
+    
+    def add_achievement(self, user_id, achievement_type, achievement_name):
+        """Ajoute un achievement à l'utilisateur"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Vérifie si l'achievement existe déjà
+        cursor.execute('''
+            SELECT COUNT(*) FROM achievements 
+            WHERE user_id = ? AND achievement_type = ?
+        ''', (user_id, achievement_type))
+        
+        if cursor.fetchone()[0] == 0:
+            cursor.execute('''
+                INSERT INTO achievements (user_id, achievement_type, achievement_name)
+                VALUES (?, ?, ?)
+            ''', (user_id, achievement_type, achievement_name))
+            
+            conn.commit()
+            conn.close()
+            return True
+        
+        conn.close()
+        return False
+    
+    def get_achievements(self, user_id):
+        """Récupère les achievements de l'utilisateur"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT achievement_type, achievement_name, achieved_at 
+            FROM achievements 
+            WHERE user_id = ?
+            ORDER BY achieved_at DESC
+        ''', (user_id,))
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                'type': row[0],
+                'name': row[1],
+                'achieved_at': row[2]
+            })
+        
+        conn.close()
+        return results
+    
+    def cache_anime(self, anime_data):
+        """Met en cache les données d'un anime"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Convertir les listes en JSON pour le stockage
+        genres_json = json.dumps([g['name'] for g in anime_data.get('genres', [])])
+        studios_json = json.dumps([s['name'] for s in anime_data.get('studios', [])])
+        producers_json = json.dumps([p['name'] for p in anime_data.get('producers', [])])
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO anime_cache 
+            (anime_id, title, title_japanese, title_english, image_url, synopsis, 
+             score, episodes, status, year, genres, studios, producers, duration, rating, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            anime_data.get('mal_id'),
+            anime_data.get('title'),
+            anime_data.get('title_japanese'),
+            anime_data.get('title_english'),
+            anime_data.get('images', {}).get('jpg', {}).get('image_url'),
+            anime_data.get('synopsis'),
+            anime_data.get('score'),
+            anime_data.get('episodes'),
+            anime_data.get('status'),
+            anime_data.get('year'),
+            genres_json,
+            studios_json,
+            producers_json,
+            anime_data.get('duration'),
+            anime_data.get('rating'),
+            anime_data.get('source')
+        ))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_cached_anime(self, anime_id):
+        """Récupère un anime depuis le cache"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM anime_cache WHERE anime_id = ?
+        ''', (anime_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            # Reconstruire l'objet anime à partir des données en cache
+            return {
+                'mal_id': row[0],
+                'title': row[1],
+                'title_japanese': row[2],
+                'title_english': row[3],
+                'images': {'jpg': {'image_url': row[4]}},
+                'synopsis': row[5],
+                'score': row[6],
+                'episodes': row[7],
+                'status': row[8],
+                'year': row[9],
+                'genres': [{'name': name} for name in json.loads(row[10])],
+                'studios': [{'name': name} for name in json.loads(row[11])],
+                'producers': [{'name': name} for name in json.loads(row[12])],
+                'duration': row[13],
+                'rating': row[14],
+                'source': row[15]
+            }
+        return None
+    
+    def cache_character(self, character_data):
+        """Met en cache les données d'un personnage"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Convertir les listes en JSON pour le stockage
+        animeography_json = json.dumps(character_data.get('animeography', []))
+        voice_actors_json = json.dumps(character_data.get('voices', []))
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO character_cache 
+            (character_id, name, name_kanji, about, image_url, favorites, animeography, voice_actors)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            character_data.get('mal_id'),
+            character_data.get('name'),
+            character_data.get('name_kanji'),
+            character_data.get('about'),
+            character_data.get('images', {}).get('jpg', {}).get('image_url'),
+            character_data.get('favorites'),
+            animeography_json,
+            voice_actors_json
+        ))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_cached_character(self, character_id):
+        """Récupère un personnage depuis le cache"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM character_cache WHERE character_id = ?
+        ''', (character_id,))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            # Reconstruire l'objet character à partir des données en cache
+            return {
+                'mal_id': row[0],
+                'name': row[1],
+                'name_kanji': row[2],
+                'about': row[3],
+                'images': {'jpg': {'image_url': row[4]}},
+                'favorites': row[5],
+                'animeography': json.loads(row[6]),
+                'voices': json.loads(row[7])
+            }
+        return None
+
+# Initialisation de la base de données
+db = AnimeDatabase()
+
+# ──────────────────────────
+# Système d'Achievements
+# ──────────────────────────
+ACHIEVEMENTS = {
+    'anime_explorer': {
+        'name': '🏆 Explorateur d\'Animes',
+        'description': 'Consulter 50 animes différents',
+        'condition': lambda user_id: len(db.get_favorites(user_id)) + len(db.get_watchlist(user_id)) >= 50
+    },
+    'genre_master': {
+        'name': '🎭 Maître des Genres',
+        'description': 'Explorer 10 genres différents',
+        'condition': lambda user_id: check_genre_variety(user_id) >= 10
+    },
+    'season_watcher': {
+        'name': '📅 Observateur de Saisons',
+        'description': 'Consulter des animes de 4 saisons différentes',
+        'condition': lambda user_id: check_season_variety(user_id) >= 4
+    },
+    'anime_lover': {
+        'name': '❤️ Amoureux d\'Animes',
+        'description': 'Ajouter 20 animes aux favoris',
+        'condition': lambda user_id: len(db.get_favorites(user_id)) >= 20
+    },
+    'completionist': {
+        'name': '✅ Completionniste',
+        'description': 'Marquer 10 animes comme complétés',
+        'condition': lambda user_id: len([item for item in db.get_watchlist(user_id) if item['status'] == 'completed']) >= 10
+    }
+}
+
+def check_genre_variety(user_id):
+    """Vérifie la variété des genres explorés par l'utilisateur"""
+    favorites = db.get_favorites(user_id)
+    watchlist = db.get_watchlist(user_id)
+    
+    all_anime_ids = set(favorites)
+    for item in watchlist:
+        all_anime_ids.add(item['anime_id'])
+    
+    genres = set()
+    for anime_id in all_anime_ids:
+        anime = db.get_cached_anime(anime_id) or get_anime_by_id(anime_id)
+        if anime and 'genres' in anime:
+            for genre in anime['genres']:
+                genres.add(genre['name'])
+    
+    return len(genres)
+
+def check_season_variety(user_id):
+    """Vérifie la variété des saisons explorées par l'utilisateur"""
+    favorites = db.get_favorites(user_id)
+    watchlist = db.get_watchlist(user_id)
+    
+    all_anime_ids = set(favorites)
+    for item in watchlist:
+        all_anime_ids.add(item['anime_id'])
+    
+    seasons = set()
+    for anime_id in all_anime_ids:
+        anime = db.get_cached_anime(anime_id) or get_anime_by_id(anime_id)
+        if anime and 'year' in anime and 'season' in anime:
+            seasons.add(f"{anime['year']}-{anime.get('season', '')}")
+    
+    return len(seasons)
+
+def check_achievements(user_id):
+    """Vérifie et attribue les achievements à un utilisateur"""
+    new_achievements = []
+    
+    for achievement_id, achievement in ACHIEVEMENTS.items():
+        if achievement['condition'](user_id):
+            if db.add_achievement(user_id, achievement_id, achievement['name']):
+                new_achievements.append(achievement['name'])
+    
+    return new_achievements
+
+# ──────────────────────────
+# Système de Recommandations Personnalisées
+# ──────────────────────────
+def get_personal_recommendations(user_id, limit=5):
+    """Génère des recommandations personnalisées basées sur les préférences de l'utilisateur"""
+    favorites = db.get_favorites(user_id)
+    watchlist = db.get_watchlist(user_id)
+    
+    if not favorites and not watchlist:
+        return get_top_anime(limit=limit)
+    
+    # Analyser les genres préférés
+    genre_counter = {}
+    all_anime_ids = set(favorites)
+    
+    for item in watchlist:
+        all_anime_ids.add(item['anime_id'])
+    
+    for anime_id in all_anime_ids:
+        anime = db.get_cached_anime(anime_id) or get_anime_by_id(anime_id)
+        if anime and 'genres' in anime:
+            for genre in anime['genres']:
+                genre_name = genre['name']
+                genre_counter[genre_name] = genre_counter.get(genre_name, 0) + 1
+    
+    # Obtenir les genres les plus populaires
+    top_genres = sorted(genre_counter.items(), key=lambda x: x[1], reverse=True)[:3]
+    
+    # Rechercher des animes similaires
+    recommendations = []
+    for genre, _ in top_genres:
+        genre_recommendations = search_anime_by_genre(genre, limit=limit)
+        for rec in genre_recommendations:
+            if rec['mal_id'] not in all_anime_ids and rec['mal_id'] not in [r['mal_id'] for r in recommendations]:
+                recommendations.append(rec)
+                if len(recommendations) >= limit:
+                    break
+        if len(recommendations) >= limit:
+            break
+    
+    # Compléter avec des animes populaires si nécessaire
+    if len(recommendations) < limit:
+        top_anime = get_top_anime(limit=limit * 2)
+        for anime in top_anime:
+            if anime['mal_id'] not in all_anime_ids and anime['mal_id'] not in [r['mal_id'] for r in recommendations]:
+                recommendations.append(anime)
+                if len(recommendations) >= limit:
+                    break
+    
+    return recommendations[:limit]
+
+def search_anime_by_genre(genre, limit=10):
+    """Recherche des animes par genre"""
+    url = f"https://api.jikan.moe/v4/anime?genres={genre}&limit={limit}"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("data") or []
+        logger.error(f"Erreur API Jikan (genre search): {r.status_code}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Erreur de connexion (genre search): {e}")
+    return []
+
+# ──────────────────────────
 # Utilitaires de texte
 # ──────────────────────────
 def decode_html_entities(text: str) -> str:
@@ -124,18 +796,30 @@ def search_anime(query, limit=10):
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
             data = r.json()
-            return data.get("data") or None
+            anime_list = data.get("data") or []
+            # Mettre en cache les résultats
+            for anime in anime_list:
+                db.cache_anime(anime)
+            return anime_list
         logger.error(f"Erreur API Jikan: {r.status_code}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Erreur de connexion: {e}")
     return None
 
 def get_anime_by_id(anime_id):
+    # Vérifier d'abord le cache
+    cached_anime = db.get_cached_anime(anime_id)
+    if cached_anime:
+        return cached_anime
+    
     url = f"https://api.jikan.moe/v4/anime/{anime_id}"
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
-            return r.json().get("data")
+            anime = r.json().get("data")
+            if anime:
+                db.cache_anime(anime)
+            return anime
     except requests.exceptions.RequestException as e:
         logger.error(f"Erreur de connexion: {e}")
     return None
@@ -145,7 +829,11 @@ def get_anime_by_season(year, season):
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
-            return (r.json().get("data") or [])[:20]
+            anime_list = (r.json().get("data") or [])[:20]
+            # Mettre en cache les résultats
+            for anime in anime_list:
+                db.cache_anime(anime)
+            return anime_list
         logger.error(f"Erreur API Jikan: {r.status_code}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Erreur de connexion: {e}")
@@ -157,7 +845,11 @@ def search_character(query, limit=10):
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
             data = r.json()
-            return data.get("data") or None
+            character_list = data.get("data") or []
+            # Mettre en cache les résultats
+            for character in character_list:
+                db.cache_character(character)
+            return character_list
         logger.error(f"Erreur API Jikan: {r.status_code}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Erreur de connexion: {e}")
@@ -165,11 +857,19 @@ def search_character(query, limit=10):
 
 def get_character_by_id(character_id):
     """Récupère les détails complets d'un personnage par son ID"""
+    # Vérifier d'abord le cache
+    cached_character = db.get_cached_character(character_id)
+    if cached_character:
+        return cached_character
+    
     url = f"https://api.jikan.moe/v4/characters/{character_id}/full"
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
-            return r.json().get("data")
+            character = r.json().get("data")
+            if character:
+                db.cache_character(character)
+            return character
         logger.error(f"Erreur API Jikan (character): {r.status_code}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Erreur de connexion (character): {e}")
@@ -197,18 +897,25 @@ def get_anime_recommendations(genres, exclude_id, limit=5):
         if r.status_code == 200:
             data = r.json().get("data") or []
             recs = [a for a in data if a.get("mal_id") != exclude_id]
+            # Mettre en cache les résultats
+            for anime in recs:
+                db.cache_anime(anime)
             return recs[:limit]
     except requests.exceptions.RequestException as e:
         logger.error(f"Erreur de connexion pour les recommandations: {e}")
     return None
 
-def get_top_anime(filter_type="all", page=1):
-    url = f"https://api.jikan.moe/v4/top/anime?filter={filter_type}&page={page}"
+def get_top_anime(filter_type="all", page=1, limit=10):
+    url = f"https://api.jikan.moe/v4/top/anime?filter={filter_type}&page={page}&limit={limit}"
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
             data = r.json()
-            return data.get("data") or [], data.get("pagination", {}).get("last_visible_page", 1)
+            anime_list = data.get("data") or []
+            # Mettre en cache les résultats
+            for anime in anime_list:
+                db.cache_anime(anime)
+            return anime_list, data.get("pagination", {}).get("last_visible_page", 1)
         logger.error(f"Erreur API Jikan (top): {r.status_code}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Erreur de connexion (top): {e}")
@@ -219,7 +926,10 @@ def get_random_anime():
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
-            return r.json().get("data")
+            anime = r.json().get("data")
+            if anime:
+                db.cache_anime(anime)
+            return anime
         logger.error(f"Erreur API Jikan (random): {r.status_code}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Erreur de connexion (random): {e}")
@@ -234,7 +944,11 @@ def get_schedule(day=None):
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
-            return r.json().get("data") or []
+            anime_list = r.json().get("data") or []
+            # Mettre en cache les résultats
+            for anime in anime_list:
+                db.cache_anime(anime)
+            return anime_list
         logger.error(f"Erreur API Jikan (schedule): {r.status_code}")
     except requests.exceptions.RequestException as e:
         logger.error(f"Erreur de connexion (schedule): {e}")
@@ -352,13 +1066,17 @@ async def check_streaming_availability(anime_title):
 # ──────────────────────────
 # Formatage (HTML)
 # ──────────────────────────
-def format_anime_basic_info(anime):
+def format_anime_basic_info(anime, user_id=None):
     titre = escape_html(decode_html_entities(anime.get("title", "Titre inconnu")))
     titre_jp = escape_html(decode_html_entities(anime.get("title_japanese", ""))) or "N/A"
     score = escape_html(str(anime.get("score", "N/A")))
     episodes = escape_html(str(anime.get("episodes", "Inconnu")))
     status = escape_html(decode_html_entities(anime.get("status", "Inconnu")))
     year = escape_html(str(anime.get("year", "N/A")))
+
+    # Vérifier si l'anime est dans les favoris
+    is_fav = db.is_favorite(user_id, anime["mal_id"]) if user_id else False
+    fav_status = "❤️" if is_fav else "🤍"
 
     caption = (
         f"🎌 <b>{titre}</b>{f' ({titre_jp})' if titre_jp != 'N/A' else ''}\n\n"
@@ -579,10 +1297,67 @@ def format_schedule(schedule_list, day=None):
     
     return text
 
+def format_watchlist_status(status, score=None, progress=None, episodes=None):
+    """Formate le statut de visionnage"""
+    status_names = {
+        "plan_to_watch": "📥 Prévoir de regarder",
+        "watching": "👁️ En cours de visionnage",
+        "completed": "✅ Terminé",
+        "dropped": "❌ Abandonné"
+    }
+    
+    text = status_names.get(status, status)
+    
+    if score is not None:
+        text += f" ⭐ {score}/10"
+    
+    if progress is not None and episodes is not None:
+        text += f" 📊 {progress}/{episodes} épisodes"
+    elif progress is not None:
+        text += f" 📊 {progress} épisodes"
+    
+    return text
+
+def format_user_stats(user_id):
+    """Formate les statistiques de l'utilisateur"""
+    favorites = db.get_favorites(user_id)
+    watchlist = db.get_watchlist(user_id)
+    achievements = db.get_achievements(user_id)
+    
+    # Compter les animes par statut
+    status_counts = {
+        "plan_to_watch": 0,
+        "watching": 0,
+        "completed": 0,
+        "dropped": 0
+    }
+    
+    for item in watchlist:
+        status_counts[item['status']] += 1
+    
+    total_animes = len(favorites) + sum(status_counts.values())
+    
+    text = f"📊 <b>Vos Statistiques Anime</b>\n\n"
+    text += f"❤️ <b>Favoris</b>: {len(favorites)} animes\n"
+    text += f"📥 <b>À regarder</b>: {status_counts['plan_to_watch']} animes\n"
+    text += f"👁️ <b>En cours</b>: {status_counts['watching']} animes\n"
+    text += f"✅ <b>Terminés</b>: {status_counts['completed']} animes\n"
+    text += f"❌ <b>Abandonnés</b>: {status_counts['dropped']} animes\n"
+    text += f"📈 <b>Total</b>: {total_animes} animes\n\n"
+    text += f"🏆 <b>Achievements</b>: {len(achievements)} obtenus\n"
+    
+    # Afficher les 3 derniers achievements
+    if achievements:
+        text += "\n<b>Derniers achievements:</b>\n"
+        for ach in achievements[:3]:
+            text += f"• {ach['name']}\n"
+    
+    return text
+
 # ──────────────────────────
 # Claviers inline 
 # ──────────────────────────
-def create_anime_navigation_keyboard(anime_id):
+def create_anime_navigation_keyboard(anime_id, user_id=None):
     keyboard = [
         [
             InlineKeyboardButton("📝 Synopsis", callback_data=f"synopsis_{anime_id}"),
@@ -600,6 +1375,67 @@ def create_anime_navigation_keyboard(anime_id):
             InlineKeyboardButton("📺 Streaming", callback_data=f"streaming_{anime_id}"),
         ],
     ]
+    
+    # Ajouter les boutons de liste personnelle si user_id est fourni
+    if user_id:
+        is_fav = db.is_favorite(user_id, anime_id)
+        fav_text = "❤️ Retirer des Favoris" if is_fav else "🤍 Ajouter aux Favoris"
+        
+        keyboard.append([
+            InlineKeyboardButton(fav_text, callback_data=f"fav_{anime_id}"),
+            InlineKeyboardButton("📋 Listes", callback_data=f"lists_{anime_id}")
+        ])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+def create_lists_keyboard(anime_id, user_id):
+    """Crée un clavier pour gérer les listes personnelles"""
+    watch_status = db.get_watch_status(user_id, anime_id)
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("📥 À regarder", callback_data=f"watch_plan_{anime_id}"),
+            InlineKeyboardButton("👁️ En cours", callback_data=f"watch_watch_{anime_id}"),
+        ],
+        [
+            InlineKeyboardButton("✅ Terminé", callback_data=f"watch_comp_{anime_id}"),
+            InlineKeyboardButton("❌ Abandonné", callback_data=f"watch_drop_{anime_id}"),
+        ]
+    ]
+    
+    if watch_status:
+        keyboard.append([
+            InlineKeyboardButton("📊 Modifier progression", callback_data=f"progress_{anime_id}")
+        ])
+    
+    keyboard.append([
+        InlineKeyboardButton("🔙 Retour", callback_data=f"anime_{anime_id}")
+    ])
+    
+    return InlineKeyboardMarkup(keyboard)
+
+def create_progress_keyboard(anime_id, current_progress=0, episodes=None):
+    """Crée un clavier pour modifier la progression"""
+    keyboard = []
+    
+    # Boutons pour augmenter/réduire la progression
+    if episodes and current_progress < episodes:
+        keyboard.append([
+            InlineKeyboardButton("➖", callback_data=f"progress_{anime_id}_down"),
+            InlineKeyboardButton(f"{current_progress}", callback_data="noop"),
+            InlineKeyboardButton("➕", callback_data=f"progress_{anime_id}_up")
+        ])
+    
+    # Bouton pour terminer tous les épisodes
+    if episodes:
+        keyboard.append([
+            InlineKeyboardButton(f"✅ Terminer ({episodes})", callback_data=f"progress_{anime_id}_{episodes}")
+        ])
+    
+    keyboard.append([
+        InlineKeyboardButton("🔙 Retour", callback_data=f"lists_{anime_id}")
+    ])
+    
     return InlineKeyboardMarkup(keyboard)
 
 def create_characters_list_keyboard(characters, anime_id, page=0, items_per_page=10):
@@ -732,6 +1568,40 @@ def create_schedule_keyboard():
     ]
     return InlineKeyboardMarkup(days)
 
+def create_profile_keyboard():
+    """Crée un clavier pour le profil utilisateur"""
+    keyboard = [
+        [
+            InlineKeyboardButton("❤️ Favoris", callback_data="profile_favorites"),
+            InlineKeyboardButton("📋 Ma Liste", callback_data="profile_watchlist"),
+        ],
+        [
+            InlineKeyboardButton("📊 Statistiques", callback_data="profile_stats"),
+            InlineKeyboardButton("🏆 Achievements", callback_data="profile_achievements"),
+        ],
+        [
+            InlineKeyboardButton("🎯 Recommandations", callback_data="profile_recommendations"),
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def create_watchlist_keyboard():
+    """Crée un clavier pour naviguer dans la watchlist"""
+    keyboard = [
+        [
+            InlineKeyboardButton("📥 À regarder", callback_data="watchlist_plan"),
+            InlineKeyboardButton("👁️ En cours", callback_data="watchlist_watch"),
+        ],
+        [
+            InlineKeyboardButton("✅ Terminés", callback_data="watchlist_comp"),
+            InlineKeyboardButton("❌ Abandonnés", callback_data="watchlist_drop"),
+        ],
+        [
+            InlineKeyboardButton("🔙 Retour", callback_data="profile_back"),
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 # ──────────────────────────
 # Claviers inline pour les sous-pages
 # ──────────────────────────
@@ -760,7 +1630,13 @@ def create_similar_animes_keyboard(similar_animes, original_anime_id):
 # Commandes
 # ──────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("🔍 Rechercher un anime", switch_inline_query_current_chat="")]]
+    user = update.message.from_user
+    db.add_user(user.id, user.username, user.first_name, user.last_name, user.language_code)
+    
+    keyboard = [
+        [InlineKeyboardButton("🔍 Rechercher un anime", switch_inline_query_current_chat="")],
+        [InlineKeyboardButton("👤 Mon Profil", callback_data="profile_main")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     welcome_text = (
@@ -776,6 +1652,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🎲 Anime aléatoire\n"
         "• 📅 Planning des sorties\n"
         "• 👥 Fonctionne dans les groupes et en privé\n\n"
+        "💡 <b>Nouvelles fonctionnalités :</b>\n"
+        "• ❤️ Système de favoris et listes personnalisées\n"
+        "• 📊 Statistiques personnelles\n"
+        "• 🏆 Système d'achievements\n"
+        "• 🎯 Recommandations personnalisées\n\n"
         "💡 <b>Commandes disponibles :</b>\n"
         "• Tapez le nom d'un anime pour le rechercher\n"
         "• <code>/saison &lt;année&gt; &lt;saison&gt;</code> (ex : <code>/saison 2023 fall</code>)\n"
@@ -783,6 +1664,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/top</code> - Liste des meilleurs animes\n"
         "• <code>/random</code> - Anime aléatoire\n"
         "• <code>/planning</code> - Planning des sorties\n"
+        "• <code>/profil</code> - Votre profil utilisateur\n"
         "• <code>/anime &lt;nom&gt;</code> ou <code>/recherche &lt;nom&gt;</code>"
     )
     await update.message.reply_text(welcome_text, parse_mode="HTML", reply_markup=reply_markup)
@@ -805,12 +1687,34 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/random</code> - Découvrir un anime au hasard\n\n"
         "📅 <b>Planning des sorties :</b>\n"
         "• <code>/planning</code> - Voir les sorties de la semaine\n\n"
+        "👤 <b>Profil utilisateur :</b>\n"
+        "• <code>/profil</code> - Gérer vos listes et voir vos stats\n\n"
         "🎯 <b>Navigation interactive :</b>\n"
-        "• Boutons : Synopsis, Détails, Studio, Trailer, Personnages, Similaires, Streaming\n\n"
+        "• Boutons : Synopsis, Détails, Studio, Trailer, Personnages, Similaires, Streaming\n"
+        "• Nouveau : Favoris, Listes de visionnage, Progression\n\n"
         "👥 <b>Groupes :</b>\n"
         "• Mentionne-moi puis écris le nom de l'anime"
     )
     await update.message.reply_text(help_text, parse_mode="HTML")
+
+async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche le profil de l'utilisateur"""
+    user_id = update.message.from_user.id
+    keyboard = create_profile_keyboard()
+    
+    # Vérifier les achievements
+    new_achievements = check_achievements(user_id)
+    
+    text = "👤 <b>Votre Profil Anime</b>\n\n"
+    text += "Gérez vos listes personnelles, consultez vos statistiques et découvrez vos achievements!\n\n"
+    
+    if new_achievements:
+        text += "🎉 <b>Nouveaux achievements débloqués!</b>\n"
+        for achievement in new_achievements:
+            text += f"• {achievement}\n"
+        text += "\n"
+    
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 # ──────────────────────────
 # Nouvelles commandes
@@ -949,9 +1853,15 @@ async def display_character_info(update_or_query, character):
     await message.reply_photo(photo=image_url, caption=info_text, parse_mode="HTML")
 
 async def display_anime_with_navigation(update_or_query, anime, edit_message=False):
+    user_id = None
+    if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query:
+        user_id = update_or_query.callback_query.from_user.id
+    elif hasattr(update_or_query, 'message') and update_or_query.message:
+        user_id = update_or_query.message.from_user.id
+    
     image_url = anime["images"]["jpg"]["large_image_url"]
-    caption = format_anime_basic_info(anime)
-    keyboard = create_anime_navigation_keyboard(anime["mal_id"])
+    caption = format_anime_basic_info(anime, user_id)
+    keyboard = create_anime_navigation_keyboard(anime["mal_id"], user_id)
 
     if hasattr(update_or_query, "callback_query") and update_or_query.callback_query:
         query = update_or_query.callback_query
@@ -1019,6 +1929,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+    user_id = query.from_user.id
+
+    # Ajouter l'utilisateur à la base de données s'il n'existe pas
+    db.add_user(user_id, query.from_user.username, query.from_user.first_name, 
+                query.from_user.last_name, query.from_user.language_code)
 
     if data.startswith("page_"):
         parts = data.split("_")
@@ -1263,10 +2178,305 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.message.reply_text("❌ Erreur lors du chargement des détails du personnage.", parse_mode="HTML")
 
+    # Gestion des favoris
+    elif data.startswith("fav_"):
+        anime_id = int(data.split("_")[1])
+        if db.is_favorite(user_id, anime_id):
+            db.remove_from_favorites(user_id, anime_id)
+            await query.answer("❌ Retiré des favoris")
+        else:
+            db.add_to_favorites(user_id, anime_id)
+            await query.answer("❤️ Ajouté aux favoris")
+            
+            # Vérifier les achievements
+            new_achievements = check_achievements(user_id)
+            if new_achievements:
+                achievement_text = "🎉 <b>Nouveaux achievements débloqués!</b>\n"
+                for achievement in new_achievements:
+                    achievement_text += f"• {achievement}\n"
+                await query.message.reply_text(achievement_text, parse_mode="HTML")
+        
+        # Mettre à jour le message
+        anime = get_anime_by_id(anime_id)
+        if anime:
+            await display_anime_with_navigation(query, anime, edit_message=True)
+
+    # Gestion des listes
+    elif data.startswith("lists_"):
+        anime_id = int(data.split("_")[1])
+        keyboard = create_lists_keyboard(anime_id, user_id)
+        await query.message.reply_text(
+            "📋 <b>Gérer les listes</b>\n\nSélectionnez une option:",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+
+    # Gestion du statut de visionnage
+    elif data.startswith("watch_"):
+        parts = data.split("_")
+        anime_id = int(parts[2])
+        status = parts[1]
+        
+        status_map = {
+            "plan": "plan_to_watch",
+            "watch": "watching",
+            "comp": "completed",
+            "drop": "dropped"
+        }
+        
+        db.update_watchlist(user_id, anime_id, status_map[status])
+        
+        status_names = {
+            "plan_to_watch": "📥 À regarder",
+            "watching": "👁️ En cours",
+            "completed": "✅ Terminé",
+            "dropped": "❌ Abandonné"
+        }
+        
+        await query.answer(f"Ajouté à {status_names[status_map[status]]}")
+        
+        # Vérifier les achievements
+        new_achievements = check_achievements(user_id)
+        if new_achievements:
+            achievement_text = "🎉 <b>Nouveaux achievements débloqués!</b>\n"
+            for achievement in new_achievements:
+                achievement_text += f"• {achievement}\n"
+            await query.message.reply_text(achievement_text, parse_mode="HTML")
+        
+        # Revenir à l'anime
+        anime = get_anime_by_id(anime_id)
+        if anime:
+            await display_anime_with_navigation(query, anime)
+
+    # Gestion de la progression
+    elif data.startswith("progress_"):
+        parts = data.split("_")
+        anime_id = int(parts[1])
+        
+        if len(parts) == 2:
+            # Afficher le clavier de progression
+            anime = get_anime_by_id(anime_id)
+            watch_status = db.get_watch_status(user_id, anime_id)
+            current_progress = watch_status['progress'] if watch_status else 0
+            episodes = anime.get('episodes')
+            
+            keyboard = create_progress_keyboard(anime_id, current_progress, episodes)
+            await query.message.reply_text(
+                "📊 <b>Modifier la progression</b>\n\nUtilisez les boutons pour ajuster:",
+                parse_mode="HTML",
+                reply_markup=keyboard
+            )
+        else:
+            # Modifier la progression
+            action = parts[2]
+            watch_status = db.get_watch_status(user_id, anime_id)
+            current_status = watch_status['status'] if watch_status else 'watching'
+            current_progress = watch_status['progress'] if watch_status else 0
+            anime = get_anime_by_id(anime_id)
+            episodes = anime.get('episodes')
+            
+            if action == "up":
+                new_progress = min(current_progress + 1, episodes if episodes else current_progress + 1)
+            elif action == "down":
+                new_progress = max(current_progress - 1, 0)
+            else:
+                new_progress = int(action)  # Valeur spécifique
+            
+            db.update_watchlist(user_id, anime_id, current_status, progress=new_progress)
+            
+            # Si on a atteint tous les épisodes, marquer comme complété
+            if episodes and new_progress >= episodes:
+                db.update_watchlist(user_id, anime_id, "completed", progress=episodes)
+                await query.answer(f"✅ Progression mise à jour: {new_progress}/{episodes} (Terminé)")
+            else:
+                await query.answer(f"📊 Progression mise à jour: {new_progress}/{episodes if episodes else '?'}")
+            
+            # Vérifier les achievements
+            new_achievements = check_achievements(user_id)
+            if new_achievements:
+                achievement_text = "🎉 <b>Nouveaux achievements débloqués!</b>\n"
+                for achievement in new_achievements:
+                    achievement_text += f"• {achievement}\n"
+                await query.message.reply_text(achievement_text, parse_mode="HTML")
+            
+            # Mettre à jour le clavier
+            keyboard = create_progress_keyboard(anime_id, new_progress, episodes)
+            try:
+                await query.message.edit_reply_markup(reply_markup=keyboard)
+            except:
+                pass  # Ignorer les erreurs d'édition
+
+    # Gestion du profil
+    elif data == "profile_main":
+        keyboard = create_profile_keyboard()
+        await query.message.edit_text(
+            "👤 <b>Votre Profil Anime</b>\n\nSélectionnez une option:",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+    
+    elif data == "profile_favorites":
+        favorites = db.get_favorites(user_id)
+        if not favorites:
+            await query.message.edit_text(
+                "❤️ <b>Vos Favoris</b>\n\nVous n'avez aucun anime dans vos favoris.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="profile_main")]])
+            )
+            return
+        
+        text = "❤️ <b>Vos Favoris</b>\n\n"
+        for i, anime_id in enumerate(favorites[:10], 1):  # Limiter à 10
+            anime = get_anime_by_id(anime_id)
+            if anime:
+                title = escape_html(decode_html_entities(anime.get("title", "Titre inconnu")))
+                text += f"{i}. {title}\n"
+        
+        if len(favorites) > 10:
+            text += f"\n... et {len(favorites) - 10} autres"
+        
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="profile_main")]])
+        await query.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    
+    elif data == "profile_watchlist":
+        keyboard = create_watchlist_keyboard()
+        await query.message.edit_text(
+            "📋 <b>Votre Liste de Visionnage</b>\n\nSélectionnez une catégorie:",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+    
+    elif data.startswith("watchlist_"):
+        status = data.split("_")[1]
+        status_map = {
+            "plan": "plan_to_watch",
+            "watch": "watching",
+            "comp": "completed",
+            "drop": "dropped"
+        }
+        
+        watchlist = db.get_watchlist(user_id, status_map[status])
+        if not watchlist:
+            status_names = {
+                "plan_to_watch": "📥 À regarder",
+                "watching": "👁️ En cours",
+                "completed": "✅ Terminés",
+                "dropped": "❌ Abandonnés"
+            }
+            
+            await query.message.edit_text(
+                f"{status_names[status_map[status]]}\n\nAucun anime dans cette catégorie.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="profile_watchlist")]])
+            )
+            return
+        
+        status_names = {
+            "plan": "📥 À regarder",
+            "watch": "👁️ En cours",
+            "comp": "✅ Terminés",
+            "drop": "❌ Abandonnés"
+        }
+        
+        text = f"{status_names[status]}\n\n"
+        for i, item in enumerate(watchlist[:10], 1):  # Limiter à 10
+            anime = get_anime_by_id(item['anime_id'])
+            if anime:
+                title = escape_html(decode_html_entities(anime.get("title", "Titre inconnu")))
+                text += f"{i}. {title}"
+                if item.get('progress'):
+                    text += f" ({item['progress']}/{anime.get('episodes', '?')})"
+                if item.get('score'):
+                    text += f" ⭐ {item['score']}"
+                text += "\n"
+        
+        if len(watchlist) > 10:
+            text += f"\n... et {len(watchlist) - 10} autres"
+        
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="profile_watchlist")]])
+        await query.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    
+    elif data == "profile_stats":
+        stats_text = format_user_stats(user_id)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="profile_main")]])
+        await query.message.edit_text(stats_text, parse_mode="HTML", reply_markup=keyboard)
+    
+    elif data == "profile_achievements":
+        achievements = db.get_achievements(user_id)
+        if not achievements:
+            await query.message.edit_text(
+                "🏆 <b>Vos Achievements</b>\n\nVous n'avez pas encore débloqué d'achievements.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="profile_main")]])
+            )
+            return
+        
+        text = "🏆 <b>Vos Achievements</b>\n\n"
+        for i, achievement in enumerate(achievements, 1):
+            text += f"{i}. {achievement['name']}\n"
+            text += f"   <i>Débloqué le {achievement['achieved_at'][:10]}</i>\n\n"
+        
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="profile_main")]])
+        await query.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    
+    elif data == "profile_recommendations":
+        await query.message.edit_text(
+            "🎯 <b>Chargement de vos recommandations personnalisées...</b>",
+            parse_mode="HTML"
+        )
+        
+        recommendations = get_personal_recommendations(user_id, 5)
+        if not recommendations:
+            await query.message.edit_text(
+                "🎯 <b>Recommandations Personnalisées</b>\n\nImpossible de générer des recommandations pour le moment.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Retour", callback_data="profile_main")]])
+            )
+            return
+        
+        text = "🎯 <b>Recommandations Personnalisées</b>\n\n"
+        text += "Basé sur vos préférences, nous vous recommandons:\n\n"
+        
+        for i, anime in enumerate(recommendations, 1):
+            title = escape_html(decode_html_entities(anime.get("title", "Titre inconnu")))
+            score = escape_html(str(anime.get("score", "N/A")))
+            text += f"{i}. {title} ⭐ {score}\n"
+        
+        # Créer un clavier avec les recommandations
+        keyboard = []
+        for anime in recommendations:
+            title = decode_html_entities(anime.get("title", "Sans titre"))
+            if len(title) > 30:
+                title = title[:27] + "..."
+            keyboard.append([InlineKeyboardButton(title, callback_data=f"anime_{anime['mal_id']}")])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Retour", callback_data="profile_main")])
+        
+        await query.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif data == "profile_back":
+        keyboard = create_profile_keyboard()
+        await query.message.edit_text(
+            "👤 <b>Votre Profil Anime</b>\n\nSélectionnez une option:",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+
+    # No operation - ne rien faire
+    elif data == "noop":
+        pass
+
 # ──────────────────────────
 # Messages & erreurs
 # ──────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    db.add_user(user.id, user.username, user.first_name, user.last_name, user.language_code)
+    
     if update.message.chat.type in ["group", "supergroup"]:
         if context.bot.username and f"@{context.bot.username}" in update.message.text:
             # Extraire le query après la mention du bot
@@ -1309,6 +2519,7 @@ def main():
     app.add_handler(CommandHandler("top", top_command))
     app.add_handler(CommandHandler("random", random_command))
     app.add_handler(CommandHandler("planning", planning_command))
+    app.add_handler(CommandHandler("profil", profile_command))
 
     # Inline & messages
     app.add_handler(CallbackQueryHandler(button_handler))
